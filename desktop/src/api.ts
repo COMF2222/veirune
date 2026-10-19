@@ -53,7 +53,7 @@ const previewPlaylistTracks = new Map<number, number[]>()
 const previewFollowed = new Set<number>()
 const previewUsers: User[] = [{ id: 1, username: 'SoundCloud Demo', full_name: 'Veirune Preview', description: 'Здесь можно посмотреть, как будут выглядеть треки, альбомы и плейлисты твоего профиля.', followers_count: 0, track_count: demo.length, public_playlists_count: previewPlaylists.length }]
 previewUsers.push({ id: 2, username: 'Luna Waves', full_name: 'Luna', followers_count: 120, track_count: 4 }, { id: 3, username: 'Demo Listener', full_name: 'Алексей', followers_count: 0, track_count: 0 })
-const previewSettings: Settings = { wave_mode: 'Balanced', wave_mood: 'Calm', leaderboard_anonymous: true, normalization: false, crossfade_ms: 0, gapless: true, settings_version: 2, music_taste: { discovery: .5, diversity: .5, repeat_days: 2, genres: [] }, theme_presets: [], offline_limit_mb: 0, autoplay: true, compact_rows: false, visualiser: 'Spectrum', theme: 'Dark', language: 'Russian', liked_ids: [], followed_user_ids: [], quick_access: [], inbox: [], mono: false, balance: 0, eq_enabled: false, eq_preamp_db: 0, eq_gains_db: Array(10).fill(0), startup_page: 'Home', main_window_bounds: null, close_to_tray: true, memory_profile: 'Balanced', reduced_motion: false, accent_rgb: [255, 85, 25], background_image: null, interface_font: null, discord_client_id: '', discord_presence: false, background_opacity: .25, background_dim: 0, background_blur: 0, background_overlay: .8, panel_rgb: null, panel_opacity: .85, panel_blur: 12, heading_opacity: null, text_rgb: null, muted_text_rgb: null, interface_text_scale: 1, interface_scale: 1, lyrics_scale: 1, lyrics_blur_past: true, lyrics_auto_scroll: true, show_track_numbers: true, soundcloud_profile_url: null, audio_cache_limit_mb: 2048, eq_auto: false, mini_player_style: 'Airwave', winamp_window: false, winamp_on_top: false, winamp_skin: null, winamp_shade: false, winamp_eq_window: false, winamp_eq_shade: false, winamp_pl_window: false, winamp_pl_shade: false, winamp_pl_rows: 8, winamp_scale: 2 }
+const previewSettings: Settings = { wave_mode: 'Balanced', wave_mood: 'Calm', leaderboard_anonymous: true, show_community: true, normalization: false, crossfade_ms: 0, gapless: true, settings_version: 2, music_taste: { discovery: .5, diversity: .5, repeat_days: 2, genres: [] }, theme_presets: [], offline_limit_mb: 0, autoplay: true, compact_rows: false, visualiser: 'Spectrum', theme: 'Dark', language: 'Russian', liked_ids: [], followed_user_ids: [], quick_access: [], inbox: [], mono: false, balance: 0, eq_enabled: false, eq_preamp_db: 0, eq_gains_db: Array(10).fill(0), startup_page: 'Home', main_window_bounds: null, close_to_tray: true, memory_profile: 'Balanced', reduced_motion: false, accent_rgb: [255, 85, 25], background_image: null, interface_font: null, discord_client_id: '', discord_presence: false, background_opacity: .25, background_dim: 0, background_blur: 0, background_overlay: .8, panel_rgb: null, panel_opacity: .85, panel_blur: 12, heading_opacity: null, text_rgb: null, muted_text_rgb: null, interface_text_scale: 1, interface_scale: 1, lyrics_scale: 1, lyrics_blur_past: true, lyrics_auto_scroll: true, show_track_numbers: true, soundcloud_profile_url: null, audio_cache_limit_mb: 2048, eq_auto: false, mini_player_style: 'Airwave', winamp_window: false, winamp_on_top: false, winamp_skin: null, winamp_shade: false, winamp_eq_window: false, winamp_eq_shade: false, winamp_pl_window: false, winamp_pl_shade: false, winamp_pl_rows: 8, winamp_scale: 2 }
 const previewText = (ru: string, en: string) => previewSettings.language === 'English' ? en : ru
 const previewComments: Comment[] = []
 const previewReposts = new Set<number>()
@@ -71,7 +71,17 @@ const previewQueueHistory: PlayerState[] = []
 let previewSleepUntil: number | null = null
 const previewLikedAt = new Map<number, number>()
 
+const previewEditorial = new Set<number>()
+async function communityRequest<T>(action: 'home'|'role'|'pick'|'editor', input: Record<string,unknown> = {}): Promise<T> {
+  if (!preview) return invoke<T>('community_request',{action,input})
+  if(action === 'pick') { if(input.active) previewEditorial.add(Number(input.trackId)); else previewEditorial.delete(Number(input.trackId)) }
+  const role={canEdit:true,isOwner:false,pickedIds:[...previewEditorial]}
+  const rows=demo.slice(0,3).map((track,index)=>({trackId:track.id,track,listeners:5-index}))
+  return (action === 'home' ? {role,today:rows,yesterday:rows.slice(1),week:rows,editorial:demo.filter(t=>previewEditorial.has(t.id)).map(track=>({trackId:track.id,track,votes:1,pickedByMe:true})),day:'2026-10-19',timezone:'UTC'} : role) as T
+}
+
 export const api = {
+  community: communityRequest,
   leaderboard: (days: number, sort: string) => preview ? Promise.resolve<import('./types').LeaderboardData>({ days, sort, updatedAt: Date.now() / 1000, entries: [], mine: null, participants: 0 }) : invoke<import('./types').LeaderboardData>('leaderboard', { days, sort }),
   leaderboardAnonymity: (anonymous: boolean) => preview ? (previewSettings.leaderboard_anonymous = anonymous, Promise.resolve()) : invoke<void>('leaderboard_anonymity', { anonymous }),
 
@@ -480,6 +490,6 @@ export const api = {
 }
 
 export type ServerSession = { user_id: number; admin: boolean }
-export type ApprovalUser = { id: number; username: string; status: 'pending' | 'approved' | 'denied'; updated_at: number; last_seen: number; online?: boolean | null; stream_requests_today?: number | null; usage_day?: string | null }
+export type ApprovalUser = { id: number; username: string; status: 'pending' | 'approved' | 'denied'; updated_at: number; last_seen: number; online?: boolean | null; stream_requests_today?: number | null; usage_day?: string | null; editor?: boolean }
 export type ApprovalSettings = { approval_required: boolean }
 export type MediaStats = { cache_bytes: number; cache_limit_bytes: number; cache_hits: number; cache_misses: number; active_downloads: number; peak_downloads: number; month_served_bytes: number; traffic_month: string }

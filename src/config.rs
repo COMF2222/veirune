@@ -52,6 +52,7 @@ pub struct Settings {
     pub wave_mood: WaveMood,
     #[serde(default = "default_true")]
     pub leaderboard_anonymous: bool,
+    pub show_community: bool,
     pub theme_presets: Vec<serde_json::Value>,
     pub offline_limit_mb: u64,
     pub normalization: bool,
@@ -289,7 +290,7 @@ impl Default for Settings {
         Self {
             settings_version: 2,
             music_taste: MusicTaste::default(),
-            wave_mode: WaveMode::Balanced, wave_mood: WaveMood::Calm, leaderboard_anonymous: true,
+            wave_mode: WaveMode::Balanced, wave_mood: WaveMood::Calm, leaderboard_anonymous: true, show_community: true,
             theme_presets: Vec::new(),
             offline_limit_mb: 0,
             normalization: false,

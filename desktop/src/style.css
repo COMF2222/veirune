@@ -323,6 +323,18 @@ html[data-theme="light"] { --surface-base: #eff0f4; --surface-nav: #f9f9fb; --su
 .main.has-wallpaper > * { position: relative; z-index: 1; }
 .timeline span { width: auto; min-width: 33px; flex-shrink: 0; white-space: nowrap; }
 .track-duration { white-space: nowrap; }
+.community-home { margin: 28px 0; }
+.community-description, .community-listeners { color: var(--text-muted); }
+.community-home .tabs { display: flex; flex-wrap: wrap; gap: 8px; }
+.community-home .tabs button { min-height: 44px; }
+.community-home h2 { margin-top: 24px; }
+.community-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 24px; }
+.community-heading h2 { margin: 0; }
+.editorial-manage { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.editorial-manage > p { width: 100%; color: var(--text-muted); }
+.editorial-button-wrap { position: relative; display: inline-flex; }
+.editorial-error { position: absolute; bottom: 100%; left: 0; width: 260px; max-width: 80vw; padding: 12px; z-index: 50; background: var(--surface-raised, #20232c); color: var(--text, #fff); border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
+.editorial-button-wrap button[aria-pressed="true"] { color: var(--accent); }
 .timeline-seek { flex: 1; min-width: 0; height: 18px; margin: 0; appearance: none; background: transparent; cursor: pointer; }
 .timeline-seek::-webkit-slider-runnable-track { height: 5px; border-radius: 99px; background: linear-gradient(to right, var(--accent) 0 var(--seek-progress), #454852 var(--seek-progress) 100%); }
 .timeline-seek::-webkit-slider-thumb { width: 12px; height: 12px; margin-top: -3.5px; appearance: none; border: 2px solid var(--surface-nav); border-radius: 50%; background: #f5f5f7; }

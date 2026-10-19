@@ -16,7 +16,7 @@ use std::collections::VecDeque;
 
 #[derive(Clone)]
 struct QueueSnapshot { queue: Vec<Track>, order: Vec<usize>, current: Option<usize>, position: u64, playing: bool, shuffle: bool, priority: Vec<usize> }
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct AudioPreferences { crossfade_ms: u32, gapless: bool }
 struct SleepTimer { deadline: Option<Instant>, track_id: Option<u64> }
 struct PreparedTrack { track: Track, decoder: DecoderSlot, samples: Vec<f32>, rate: u32, duration: u64, bitrate: u32, channels: u16 }
@@ -417,7 +417,8 @@ impl Player {
     }
 
     fn transition_candidate(&self) -> Option<(u64, usize, Track, u64, u32)> {
-        let preferences = self.audio_preferences.lock();
+        // A UI/sync update must not wait behind the playback-state lock.
+        let preferences = *self.audio_preferences.lock();
         if !preferences.gapless && preferences.crossfade_ms == 0 { return None; }
         let state = self.state.lock();
         if !state.is_playing || state.loading || state.preview_fallback || state.repeat == RepeatMode::One || state.ab_start_ms.is_some() || self.sleep_view().1 { return None; }
@@ -430,7 +431,6 @@ impl Player {
         let generation = self.load_generation.load(Ordering::Acquire);
         let track = state.queue.get(next)?.clone();
         drop(state);
-        drop(preferences);
         // The decoder lock comes before the player-state lock elsewhere. Do
         // not hold state while checking EOF. Generation is rechecked at commit.
         let decoded_end = {
@@ -2000,6 +2000,36 @@ mod tests {
         player.attach(); player.set_demo(true);
         { let mut state = player.state.lock(); state.queue = crate::demo::demo_tracks().into_iter().take(3).collect(); state.order = vec![2,0,1]; state.current = Some(0); state.shuffle = true; state.position_ms = 42000; state.is_playing = false; state.duration_ms = state.queue[0].effective_duration_ms(); }
         player
+    }
+
+    #[test]
+    fn transition_waiting_for_playback_does_not_block_preference_updates() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let player = improved_player_fixture(&runtime, dir.path().join("settings.json"));
+        player.set_audio_preferences(false, 8000, true);
+        let playback = player.state.lock();
+        let candidate_player = player.clone();
+        let (started, entered) = std::sync::mpsc::channel();
+        let candidate = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            candidate_player.transition_candidate()
+        });
+        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        // Let the candidate wait on the deliberately held playback state.
+        std::thread::sleep(Duration::from_millis(25));
+        let update_player = player.clone();
+        let (done, updated) = std::sync::mpsc::channel();
+        let update = std::thread::spawn(move || {
+            update_player.set_audio_preferences(true, 4000, true);
+            done.send(()).unwrap();
+        });
+        let result = updated.recv_timeout(Duration::from_secs(2));
+        // Always release and join, even when testing the old deadlocking order.
+        drop(playback);
+        candidate.join().unwrap();
+        update.join().unwrap();
+        assert!(result.is_ok(), "preference update waited behind playback state");
     }
     #[test]
     fn undo_restores_queue_and_shuffle_without_interrupting_the_current_track() {

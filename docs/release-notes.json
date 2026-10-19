@@ -2,6 +2,27 @@
   "schema": 1,
   "releases": [
     {
+      "version": "0.4.22",
+      "ru": {
+        "title": "Музыка нашего сообщества",
+        "changes": [
+          "На главной появились популярные треки за сегодня, вчера и неделю — по числу уникальных слушателей.",
+          "Общий выбор редакции: назначенные владельцем редакторы добавляют треки кнопкой в нижнем или большом плеере.",
+          "Популярное и выбор редакции можно скрыть в настройках.",
+          "Устранена возможная взаимная блокировка интерфейса и фонового обновления настроек звука."
+        ]
+      },
+      "en": {
+        "title": "Music from our community",
+        "changes": [
+          "Home now shows popular tracks for today, yesterday and the week, ranked by unique listeners.",
+          "Editors’ picks: owner-appointed editors add songs from the bottom or full-screen player.",
+          "Hide popular music and editors’ picks in Settings.",
+          "Prevented a possible deadlock between the interface and background audio preference updates."
+        ]
+      }
+    },
+    {
       "version": "0.4.21",
       "ru": {
         "title": "Время длинных треков",

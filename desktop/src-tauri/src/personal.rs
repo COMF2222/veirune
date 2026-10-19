@@ -8,7 +8,7 @@ mod feedback;
 pub use feedback::{Feedback, PublicTrack};
 
 pub const PORTABLE: &[&str] = &[
-    "wave_mode", "wave_mood", "leaderboard_anonymous",
+    "wave_mode", "wave_mood", "leaderboard_anonymous", "show_community",
     "theme", "language", "music_taste", "theme_presets", "quick_access", "accent_rgb", "panel_rgb",
     "panel_opacity", "panel_blur", "heading_opacity", "text_rgb", "muted_text_rgb", "interface_text_scale",
     "interface_scale", "background_opacity", "background_dim", "background_blur", "background_overlay",
@@ -337,7 +337,7 @@ impl Hub {
         }
         let url = format!("{server}/v1/me/personal");
         wave.replace_dislikes(&self.feedback());
-        let remote: Cloud = http.get(&url).header("X-Fastcloud-Preferences", "2").header("Authorization", format!("OAuth {token}")).send().await?.error_for_status()?.json().await?;
+        let remote: Cloud = http.get(&url).header("X-Fastcloud-Preferences", "3").header("Authorization", format!("OAuth {token}")).send().await?.error_for_status()?.json().await?;
         let payload = {
             let mut inner = self.inner.lock();
             if inner.epoch != epoch { return Ok(()); }
@@ -351,7 +351,7 @@ impl Hub {
             json!({"preferences": inner.cache.dirty_preferences, "folders": inner.cache.dirty_folders.iter().take(100).collect::<BTreeMap<_,_>>(), "smartPlaylists": inner.cache.dirty_smart.iter().take(100).collect::<BTreeMap<_,_>>(), "likedAt": inner.cache.dirty_likes.iter().take(100).collect::<BTreeMap<_,_>>(), "trackFeedback":inner.cache.dirty_feedback.iter().take(100).collect::<BTreeMap<_,_>>(), "device": inner.cache.device, "stats": stats})
         };
         let has_changes = ["preferences","folders","smartPlaylists","likedAt","trackFeedback"].iter().any(|key| payload[key].as_object().is_some_and(|map| !map.is_empty())) || payload["stats"].as_array().is_some_and(|rows| !rows.is_empty());
-        let remote = if has_changes { http.post(&url).header("X-Fastcloud-Preferences", "2").header("Authorization", format!("OAuth {token}")).json(&payload).send().await?.error_for_status()?.json::<Cloud>().await? } else { remote };
+        let remote = if has_changes { http.post(&url).header("X-Fastcloud-Preferences", "3").header("Authorization", format!("OAuth {token}")).json(&payload).send().await?.error_for_status()?.json::<Cloud>().await? } else { remote };
         let mut local = settings.lock();
         let preferences = {
             let mut inner = self.inner.lock();

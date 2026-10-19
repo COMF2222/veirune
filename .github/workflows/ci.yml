@@ -44,7 +44,7 @@ jobs:
       - name: Test update notifications
         run: node --experimental-strip-types --test desktop/tests/updatePolling.test.ts
       - name: Test themes, queue and error actions
-        run: node --experimental-strip-types --test desktop/tests/appImprovements.test.ts desktop/tests/windowActions.test.ts desktop/tests/duration.test.ts
+        run: node --experimental-strip-types --test desktop/tests/appImprovements.test.ts desktop/tests/windowActions.test.ts desktop/tests/duration.test.ts desktop/tests/communityLabels.test.ts
       - name: Test lyrics timing
         run: node --experimental-strip-types --test desktop/tests/lyricsTiming.test.ts desktop/tests/waveGreeting.test.ts
       - name: Test application behavior, shared audio and lyrics

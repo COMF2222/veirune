@@ -21,6 +21,7 @@ mod offline;
 mod appearance;
 mod diagnostics;
 mod personal;
+mod community;
 mod chat;
 mod wave;
 mod station;
@@ -303,6 +304,8 @@ enum Connection {
 
 #[derive(Serialize, serde::Deserialize)]
 struct ApprovalUser {
+    #[serde(default)]
+    editor: bool,
     id: u64,
     username: String,
     status: String,
@@ -735,13 +738,19 @@ fn shared_catalogue_lists_keep_the_json_array_contract() {
 }
 
 #[tauri::command]
-fn player_state(
+async fn player_state(
     state: tauri::State<'_, AppState>,
     known_queue_revision: Option<u64>,
 ) -> Result<PlayerView, String> {
     let player = state.player()?;
+    // Dispatch polling off the native window event loop. Read independent
+    // snapshots before playback state. Settings and audio
+    // preferences are updated by other threads; nested locks here can freeze IPC.
+    let discord_presence = state.settings.lock().discord_presence;
+    let can_undo_queue = player.can_undo_queue();
+    let (sleep_remaining_ms, sleep_after_track) = player.sleep_view();
     let current = player.state.lock();
-    if state.settings.lock().discord_presence {
+    if discord_presence {
         let mut last_presence = state.last_presence.lock();
         if let Some(track) = current.current.and_then(|index| current.queue.get(index)) {
             let stamp = PresenceStamp {
@@ -771,9 +780,9 @@ fn player_state(
     }
     let track_id = current.current.and_then(|index| current.queue.get(index)).map(|track| track.id);
     let mut view = PlayerView {
-        can_undo_queue: player.can_undo_queue(),
-        sleep_remaining_ms: player.sleep_view().0,
-        sleep_after_track: player.sleep_view().1,
+        can_undo_queue,
+        sleep_remaining_ms,
+        sleep_after_track,
         queue: queue_snapshot(&current.queue, current.queue_revision, known_queue_revision),
         queue_revision: current.queue_revision,
         current: current.current,
@@ -2385,6 +2394,11 @@ fn theme_action(state: tauri::State<'_, AppState>, action: String, name: Option<
 fn personal_collections(state: tauri::State<'_, AppState>) -> serde_json::Value { state.personal.collections() }
 
 #[tauri::command]
+async fn community_request(state: tauri::State<'_, AppState>, action: community::Action, input: serde_json::Value) -> Result<serde_json::Value,String> {
+    community::call(&state.client, action, input).await
+}
+
+#[tauri::command]
 async fn leaderboard(state: tauri::State<'_, AppState>, days: u32, sort: String) -> Result<serde_json::Value, String> {
     if ![0, 7, 30].contains(&days) || !["time", "plays"].contains(&sort.as_str()) { return Err("Invalid leaderboard selection".into()); }
     let (server, token) = state.client.relay_credentials().await.map_err(|e| e.to_string())?.ok_or("Sign in through the Veirune server")?;
@@ -2695,6 +2709,7 @@ fn set_setting(
         "wave_mode" => settings.wave_mode = serde_json::from_value(value).map_err(|e| e.to_string())?,
         "wave_mood" => settings.wave_mood = serde_json::from_value(value).map_err(|e| e.to_string())?,
         "leaderboard_anonymous" => settings.leaderboard_anonymous = value.as_bool().ok_or("Expected true or false")?,
+        "show_community" => settings.show_community = value.as_bool().ok_or("Expected true or false")?,
         "music_taste" => {
             let mut taste: config::MusicTaste = serde_json::from_value(value).map_err(|e| e.to_string())?;
             taste.normalize();
@@ -3834,7 +3849,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_icon::application_icon,
             chat_request,
-            leaderboard, leaderboard_anonymity, personal_collections, listening_statistics, update_personal_collection, smart_playlist_tracks,
+            community_request, leaderboard, leaderboard_anonymity, personal_collections, listening_statistics, update_personal_collection, smart_playlist_tracks,
             sleep_timer, sync_personal_data, settings_backup,
             connection,
             my_profile,
