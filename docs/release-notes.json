@@ -2,6 +2,21 @@
   "schema": 1,
   "releases": [
     {
+      "version": "0.4.23",
+      "ru": {
+        "title": "Лаконичная главная",
+        "changes": [
+          "Убраны лишние пояснения и заглушки в популярных треках и выборе редакции."
+        ]
+      },
+      "en": {
+        "title": "A cleaner Home screen",
+        "changes": [
+          "Removed extra descriptions and empty-state messages from popular music and editors’ picks."
+        ]
+      }
+    },
+    {
       "version": "0.4.22",
       "ru": {
         "title": "Музыка нашего сообщества",
