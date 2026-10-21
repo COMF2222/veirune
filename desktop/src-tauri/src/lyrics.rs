@@ -177,14 +177,53 @@ fn bilingual_alias(value: &str) -> Option<(&str, &str)> {
     None
 }
 
+// SoundCloud display names can end in genre hashtags. Keep the original
+// identity too; only remove complete trailing labels with a nonempty name.
+fn without_artist_hashtags(value: &str) -> &str {
+    let mut name = value.trim();
+    while let Some((prefix, tag)) = name.rsplit_once(' ') {
+        let Some(label) = tag.strip_prefix('#') else {
+            break;
+        };
+        if prefix.trim().is_empty()
+            || !label.starts_with(char::is_alphabetic)
+            || !label
+                .chars()
+                .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '-'))
+        {
+            break;
+        }
+        name = prefix.trim_end();
+    }
+    name
+}
+
+// A compact "+guest" suffix is a common upload credit. Leave the exact title
+// intact for timed lyrics and only try the base title for plain-text sources.
+// Spaced additions ("+ reverb"), arithmetic and version labels stay untouched.
+fn without_compact_guest(value: &str) -> Option<&str> {
+    let (title, guest) = value.rsplit_once(" +")?;
+    (!title.trim().is_empty()
+        && guest.starts_with(char::is_alphabetic)
+        && guest
+            .chars()
+            .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '-' | '\''))
+        && version_tags(guest).is_empty())
+        .then(|| title.trim_end())
+}
+
 fn artist_keys(value: &str) -> Vec<String> {
     let value = metadata_text(value);
     let mut keys = vec![comparable(&value)];
     if let Some((start, _)) = feature_marker(&value) {
         keys.push(comparable(&value[..start]));
     }
-    if let Some((name, alias)) = bilingual_alias(&value) {
-        keys.extend([comparable(name), comparable(alias)]);
+    let name = without_artist_hashtags(&value);
+    keys.push(comparable(name));
+    for variant in [value.as_str(), name] {
+        if let Some((name, alias)) = bilingual_alias(variant) {
+            keys.extend([comparable(name), comparable(alias)]);
+        }
     }
     keys.retain(|key| !key.is_empty());
     keys
@@ -372,6 +411,14 @@ pub(super) fn candidate_pairs(artist: &str, title: &str) -> Vec<(String, String)
             comparable(&pair.0) == comparable(performer) && comparable(&pair.1) == comparable(song)
         }) {
             pairs.push((performer.to_owned(), song.to_owned()));
+        }
+        let name = without_artist_hashtags(performer);
+        if name != performer
+            && !pairs.iter().any(|pair| {
+                comparable(&pair.0) == comparable(name) && comparable(&pair.1) == comparable(song)
+            })
+        {
+            pairs.push((name.to_owned(), song.to_owned()));
         }
         if let Some((start, _)) = feature_marker(performer) {
             let primary = performer[..start].trim();
@@ -805,6 +852,9 @@ pub(super) fn genius_title_keys(value: &str) -> Vec<String> {
     // convention local to Genius; LRCLIB recording/timing checks stay exact.
     let value = value.trim_end_matches(['*', ' ']);
     let mut keys = vec![comparable(value)];
+    if let Some(title) = without_compact_guest(value) {
+        keys.push(comparable(title));
+    }
     if let Some((name, alias)) = bilingual_alias(value) {
         keys.extend([comparable(name), comparable(alias)]);
     }
@@ -1077,6 +1127,9 @@ fn plain_fallback_pairs(pairs: &[(String, String)]) -> Vec<(String, String)> {
             }
         }
         let plain_title = clean_title(&plain_title);
+        let plain_title = without_compact_guest(&plain_title)
+            .unwrap_or(&plain_title)
+            .to_owned();
         if comparable(&plain_title) != comparable(title) && !plain_title.is_empty() {
             result.push((artist.clone(), plain_title));
         }
@@ -1481,6 +1534,57 @@ mod tests {
         }
         assert!(genius_candidates(&data, "CUPSIZE", "ты причина (Remix)").is_empty());
         assert!(genius_candidates(&data, "CUPSIZE", "другая песня").is_empty());
+    }
+
+    #[test]
+    fn reported_meteli_matches_bilingual_credits_with_upload_annotations() {
+        // Titles and artist names verified on the supplied SoundCloud/Genius pages.
+        let song = serde_json::json!({
+            "title": "метели (snowstorms)",
+            "primary_artist": {"name": "империя эмо (empireofemo)"}
+        });
+        assert!(genius_metadata_matches(
+            &song, "империя эмо #emo", "метели +голодный"
+        ));
+        assert!(candidate_pairs("империя эмо #emo", "метели +голодный")
+            .contains(&("империя эмо".into(), "метели +голодный".into())));
+        let pairs = candidate_pairs("империя эмо #emo", "метели +голодный");
+        assert!(plain_fallback_pairs(&pairs)
+            .contains(&("империя эмо".into(), "метели".into())));
+        for (artist, title) in [
+            ("Другой артист #emo", "метели +голодный"),
+            ("империя эмо #emo", "другая песня +голодный"),
+            ("империя эмо #emo", "метели +голодный (Remix)"),
+        ] {
+            assert!(!genius_metadata_matches(&song, artist, title));
+        }
+        // Guest shorthand must not relax timed recording identity.
+        assert_eq!(clean_title("метели +голодный"), "метели +голодный");
+        for title in ["Song + reverb", "Song +Live", "1+1", "Song +", "Song + 2"] {
+            assert_eq!(genius_title_keys(title), vec![comparable(title)]);
+        }
+        assert!(!same_artist("Artist", "Artist #1"));
+        assert_eq!(without_artist_hashtags("#Artist"), "#Artist");
+        assert!(!same_artist("Artist", "Artist #tag Extra"));
+        assert_eq!(without_artist_hashtags("Artist #"), "Artist #");
+        assert_eq!(without_artist_hashtags("Artist #emo #rock"), "Artist");
+        assert_eq!(
+            match_score(&record("метели", "империя эмо", 120.0),
+                "империя эмо #emo", "метели +голодный", 120_000, None),
+            0
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "contacts the public Genius service"]
+    async fn reported_meteli_finds_live_genius_lyrics() {
+        let found = lookup("империя эмо #emo".into(), "метели +голодный".into(), 0, None, None)
+            .await.unwrap().expect("the reported upload should find its Genius lyrics");
+        assert_eq!(found.id, 12446975);
+        assert_eq!(found.source_url.as_deref(),
+            Some("https://genius.com/Empireofemo-snowstorms-lyrics"));
+        assert!(found.plain_lyrics.as_deref().is_some_and(|text| !text.trim().is_empty()));
+        assert!(found.synced_lyrics.is_none());
     }
 
     #[tokio::test]

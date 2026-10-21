@@ -2,6 +2,21 @@
   "schema": 1,
   "releases": [
     {
+      "version": "0.4.24",
+      "ru": {
+        "title": "Точнее находим тексты песен",
+        "changes": [
+          "Улучшен поиск текстов для треков с подписью гостевого исполнителя и хештегами в имени профиля."
+        ]
+      },
+      "en": {
+        "title": "Better lyrics matching",
+        "changes": [
+          "Improved lyrics lookup for uploads with compact guest credits and genre hashtags in profile names."
+        ]
+      }
+    },
+    {
       "version": "0.4.23",
       "ru": {
         "title": "Лаконичная главная",
