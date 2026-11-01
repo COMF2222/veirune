@@ -2,6 +2,23 @@
   "schema": 1,
   "releases": [
     {
+      "version": "0.4.26",
+      "ru": {
+        "title": "Музыка продолжается после ошибки трека",
+        "changes": [
+          "Если трек не запускается после повторных попыток, плеер переходит к следующему.",
+          "При общем сбое соединения, истёкшей сессии или лимите SoundCloud очередь не перелистывается."
+        ]
+      },
+      "en": {
+        "title": "Keep listening after a track fails",
+        "changes": [
+          "If a track cannot start after retrying, the player moves to the next one.",
+          "Connection outages, expired sessions and SoundCloud request limits do not drain the queue."
+        ]
+      }
+    },
+    {
       "version": "0.4.25",
       "ru": {
         "title": "Понятнее ошибки воспроизведения",
