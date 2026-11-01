@@ -97,6 +97,19 @@ fn playback_error_message(error: &anyhow::Error) -> String {
     if let Some(error) = error.downcast_ref::<crate::api::error::ApiError>() {
         return error.user_message();
     }
+    // HLS requests carry reqwest errors under an anyhow stage such as
+    // "fetch playlist". Preserve their cause without exposing signed URLs.
+    if let Some(error) = error.downcast_ref::<reqwest::Error>() {
+        use crate::api::error::ApiError;
+        return match error.status() {
+            Some(reqwest::StatusCode::TOO_MANY_REQUESTS) => {
+                ApiError::RateLimited { retry_after_ms: None }.user_message()
+            }
+            Some(reqwest::StatusCode::UNAUTHORIZED) => ApiError::Unauthorized.user_message(),
+            Some(status) => ApiError::Http { status: status.as_u16(), body: String::new() }.user_message(),
+            None => "Could not reach SoundCloud. Check your connection and try again.".into(),
+        };
+    }
     error.to_string()
 }
 
@@ -2445,6 +2458,60 @@ mod tests {
         assert!(message.contains("does not allow access"));
         assert!(!message.contains("private response"));
         assert!(!message.contains("fetch streams"));
+    }
+
+    #[tokio::test]
+    async fn playlist_http_failures_keep_the_cause_without_leaking_playback_urls() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (status, expected) in [
+            (502, "temporarily unavailable"),
+            (429, "request limit was reached"),
+            (403, "does not allow access"),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/private-playback-ticket", listener.local_addr().unwrap());
+            let response = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 2048];
+                socket.read(&mut request).await.unwrap();
+                let reply = format!("HTTP/1.1 {status} Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                socket.write_all(reply.as_bytes()).await.unwrap();
+            });
+            let error = reqwest::Client::builder().no_proxy().build().unwrap()
+                .get(url).send().await.unwrap().error_for_status().unwrap_err();
+            let error = anyhow::Error::new(error).context("fetch playlist");
+            let message = playback_error_message(&error);
+            assert!(message.contains(expected), "{message}");
+            assert!(!message.contains("private-playback-ticket"));
+            response.await.unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires a saved SoundCloud account and network; decodes silently in a temporary cache"]
+    async fn live_saved_account_playback_probe() {
+        let client = Arc::new(crate::api::ApiClient::new(None, false));
+        let session = crate::auth::start(client.clone()).await.expect("saved session unavailable");
+        assert!(session.signed_in().await);
+        let settings = Settings::load().unwrap();
+        let track = settings.last_queue.get(settings.last_queue_idx.unwrap_or(0))
+            .expect("no saved track to probe").clone();
+        let temp = tempfile::tempdir().unwrap();
+        let player = Player::new(
+            Arc::new(AudioOutput::silent([0.0; 10], 0.8)), client,
+            Arc::new(AudioCache::new(temp.path().join("audio"), 32 * 1024 * 1024).unwrap()),
+            temp.path().join("settings.json"), tokio::runtime::Handle::current(),
+        );
+        let result = player.load_track_async(track, 0, 0).await;
+        if let Err(error) = result {
+            // Retain the diagnostic chain, never a signed audio URL or account data.
+            let chain = format!("{error:#}");
+            let safe = chain.split_whitespace().map(|word| {
+                if word.contains("://") { "[url]" } else { word }
+            }).collect::<Vec<_>>().join(" ");
+            panic!("silent playback probe failed: {safe}");
+        }
+        assert!(player.state.lock().sample_rate > 0);
     }
 
     #[test]

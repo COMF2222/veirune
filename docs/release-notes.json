@@ -2,6 +2,21 @@
   "schema": 1,
   "releases": [
     {
+      "version": "0.4.25",
+      "ru": {
+        "title": "Понятнее ошибки воспроизведения",
+        "changes": [
+          "При сбое загрузки аудио показывается ошибка соединения, ограничение запросов или недоступность трека вместо общей надписи."
+        ]
+      },
+      "en": {
+        "title": "Clearer playback errors",
+        "changes": [
+          "Audio loading failures now show connection issues, request limits or track availability instead of a generic error."
+        ]
+      }
+    },
+    {
       "version": "0.4.24",
       "ru": {
         "title": "Точнее находим тексты песен",
