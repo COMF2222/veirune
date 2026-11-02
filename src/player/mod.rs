@@ -38,7 +38,6 @@ const TRANSITION_RETRY_DELAY: Duration = Duration::from_secs(1);
 /// Coalesce slider events before serializing the queue and settings to disk.
 const CONTROL_SAVE_DELAY: Duration = Duration::from_millis(750);
 const PLAYBACK_RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(200), Duration::from_millis(500)];
-const MAX_CONSECUTIVE_FAILED_TRACKS: usize = 3;
 
 #[derive(Default)]
 struct RecoveryBudget { track_id: u64, attempts: u8, last_attempt: Option<Instant> }
@@ -74,14 +73,13 @@ fn skippable_playback_error(error: &anyhow::Error) -> bool {
     use crate::api::error::ApiError;
     if matches!(error.downcast_ref::<ApiError>(), Some(ApiError::Unauthorized | ApiError::RateLimited { .. }
         | ApiError::Http { status: 401 | 429, .. })) { return false; }
-    // A disconnected device or a request limit affects the whole queue.
+    // Failed connections can belong to a single audio host. Only explicit
+    // account-wide denials stop the search through the remaining recordings.
     let network = error.chain().find_map(|cause| cause.downcast_ref::<reqwest::Error>());
-    if network.is_some_and(|error| error.is_connect() || error.is_timeout()
-        || error.status().is_some_and(|status| matches!(status.as_u16(), 401 | 429))) { return false; }
+    if network.is_some_and(|error| error.status().is_some_and(|status| matches!(status.as_u16(), 401 | 429))) { return false; }
     let text = format!("{error:#}").to_lowercase();
     !["session expired", "sign in", "signed out", "signing out", "rate limit", "limit was reached",
-        "http 429", "429 too many", "http 401", "401 unauthorized", "disabled by the owner",
-        "could not reach", "connection refused", "network is unreachable", "dns error"]
+        "http 429", "429 too many", "http 401", "401 unauthorized", "disabled by the owner"]
         .iter().any(|reason| text.contains(reason))
 }
 
@@ -89,7 +87,8 @@ fn next_after_failure(state: &PlayerState, failed: &mut Vec<u64>) -> Option<usiz
     let current = state.current?;
     let id = state.queue.get(current)?.id;
     if !failed.contains(&id) { failed.push(id); }
-    if failed.len() >= MAX_CONSECUTIVE_FAILED_TRACKS { return None; }
+    // Visit each recording at most once, including when Repeat All wraps.
+    // The remaining queue bounds the search, not an arbitrary failure count.
     let at = state.order.iter().position(|&index| index == current)?;
     let wrap = if state.repeat == RepeatMode::All { at } else { 0 };
     state.order[at + 1..].iter().chain(state.order[..wrap].iter()).copied()
@@ -2300,20 +2299,32 @@ mod tests {
     }
 
     #[test]
-    fn playback_failures_stop_after_three_tracks_and_manual_retry_starts_a_new_budget() {
+    fn playback_failures_visit_all_upcoming_tracks_before_stopping() {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let folder = tempfile::tempdir().unwrap();
         let player = failure_player(&runtime, folder.path().join("settings.json"));
+        {
+            let mut state = player.state.lock();
+            for id in 6..=7 {
+                state.queue.push(serde_json::from_value(serde_json::json!({"id":id,"title":"Track"})).unwrap());
+            }
+            state.order.extend([5,6]);
+        }
         let error = anyhow::anyhow!("probe audio stream");
-        for _ in 0..3 {
+        for expected in [4,0,2,5,6] {
             let generation = player.load_generation.load(Ordering::Acquire);
             player.handle_playback_failure(generation, &error);
+            let state = player.state.lock();
+            assert_eq!(state.current, Some(expected));
+            assert!(state.is_playing && state.loading && state.error.is_none());
         }
-        assert_eq!(player.state.lock().current, Some(0));
+        player.handle_playback_failure(player.load_generation.load(Ordering::Acquire), &error);
+        assert_eq!(player.state.lock().current, Some(6));
         assert!(!player.state.lock().is_playing);
+        player.set_repeat(RepeatMode::All);
         player.retry_current();
         player.handle_playback_failure(player.load_generation.load(Ordering::Acquire), &error);
-        assert_eq!(player.state.lock().current, Some(2));
+        assert_eq!(player.state.lock().current, Some(3));
         assert!(player.state.lock().is_playing);
     }
 
@@ -2350,6 +2361,8 @@ mod tests {
         state.current = Some(2);
         assert_eq!(next_after_failure(&state, &mut failed), Some(0));
         state.current = Some(0);
+        assert_eq!(next_after_failure(&state, &mut failed), Some(3));
+        state.current = Some(3);
         assert_eq!(next_after_failure(&state, &mut failed), None);
         state.queue[1] = state.queue[0].clone(); state.current = Some(0); state.order = vec![0,1];
         assert_eq!(next_after_failure(&state, &mut Vec::new()), None);
@@ -2357,7 +2370,33 @@ mod tests {
     }
 
     #[test]
-    fn a_connection_failure_wrapped_by_session_refresh_does_not_skip_tracks() {
+    fn an_exhausted_audio_timeout_skips_to_the_next_track() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let error = runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (_socket, _) = listener.accept().await.unwrap();
+                std::future::pending::<()>().await;
+            });
+            let error = reqwest::Client::builder().no_proxy().build().unwrap()
+                .get(format!("http://{address}/audio.m3u8"))
+                .timeout(Duration::from_millis(50)).send().await.unwrap_err();
+            server.abort();
+            error
+        });
+        assert!(error.is_timeout() && !error.is_connect());
+        let folder = tempfile::tempdir().unwrap();
+        let player = failure_player(&runtime, folder.path().join("settings.json"));
+        let error = anyhow::Error::new(error).context("fetch playlist");
+        assert!(retryable_playback_error(&error));
+        player.handle_playback_failure(7, &error);
+        assert_eq!(player.state.lock().current, Some(4));
+        assert!(player.state.lock().is_playing);
+    }
+
+    #[test]
+    fn an_audio_connection_failure_does_not_block_remaining_tracks() {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let folder = tempfile::tempdir().unwrap();
         let player = failure_player(&runtime, folder.path().join("settings.json"));
@@ -2368,10 +2407,10 @@ mod tests {
                 .get(format!("http://{address}/token")).timeout(Duration::from_secs(1))
                 .send().await.unwrap_err()
         });
-        let error = crate::api::error::ApiError::Other(anyhow::Error::new(network).context("refresh token"));
+        let error = crate::api::error::ApiError::Other(anyhow::Error::new(network).context("fetch playlist"));
         player.handle_playback_failure(7, &error.into());
-        assert_eq!(player.state.lock().current, Some(1));
-        assert!(!player.state.lock().is_playing);
+        assert_eq!(player.state.lock().current, Some(4));
+        assert!(player.state.lock().is_playing);
     }
 
     #[test]
@@ -2394,7 +2433,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn audio_failure_retries_twice_then_loads_and_decodes_the_next_track() {
+    async fn audio_failures_retry_then_pass_five_broken_tracks_and_decode_the_next() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let broker = format!("http://{}", listener.local_addr().unwrap());
@@ -2416,7 +2455,7 @@ mod tests {
         let bad_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = bad_requests.clone();
         let server = tokio::spawn(async move {
-            for _ in 0..9 {
+            for _ in 0..33 {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut request = Vec::new();
                 let header_end = loop {
@@ -2433,7 +2472,7 @@ mod tests {
                 }
                 let (status, body) = if headers.starts_with("post /v1/media/resolve ") {
                     let input: serde_json::Value = serde_json::from_slice(&request[header_end..]).unwrap();
-                    let ticket = if input["urn"] == "soundcloud:tracks:1" { "a" } else { "b" }.repeat(43);
+                    let ticket = if input["urn"] == "soundcloud:tracks:6" { "b" } else { "a" }.repeat(43);
                     (200, serde_json::to_vec(&serde_json::json!({
                         "playlist_path":format!("/v1/media/{ticket}/index.m3u8"), "bitrate_kbps":128
                     })).unwrap())
@@ -2454,10 +2493,10 @@ mod tests {
         player.attach();
         let track = {
             let mut state = player.state.lock();
-            state.queue = (1..=2).map(|id| serde_json::from_value(serde_json::json!({
+            state.queue = (1..=6).map(|id| serde_json::from_value(serde_json::json!({
                 "id":id,"title":"Track","duration":4000
             })).unwrap()).collect();
-            state.order = vec![0,1]; state.current = Some(0); state.queue[0].clone()
+            state.order = (0..6).collect(); state.current = Some(0); state.queue[0].clone()
         };
         player.load_track(track, 0);
         tokio::time::timeout(Duration::from_secs(10), server).await.unwrap().unwrap();
@@ -2468,8 +2507,8 @@ mod tests {
             }
         }).await.unwrap();
         let state = player.state.lock();
-        assert_eq!(bad_requests.load(Ordering::Relaxed), 3);
-        assert_eq!(state.current, Some(1));
+        assert_eq!(bad_requests.load(Ordering::Relaxed), 15);
+        assert_eq!(state.current, Some(5));
         assert!(state.is_playing && state.error.is_none(), "{:?}", state.error);
         assert_eq!(state.sample_rate, 44100);
         assert!(player.output.buffered_ms() >= 3000);

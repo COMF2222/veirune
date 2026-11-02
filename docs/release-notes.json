@@ -2,6 +2,23 @@
   "schema": 1,
   "releases": [
     {
+      "version": "0.4.27",
+      "ru": {
+        "title": "Пропуск недоступных треков",
+        "changes": [
+          "После неудачных попыток воспроизведения плеер перебирает следующие треки, пока не найдёт рабочий или не закончатся треки в очереди.",
+          "Таймаут загрузки трека больше не останавливает переход к следующему."
+        ]
+      },
+      "en": {
+        "title": "Skip unavailable tracks",
+        "changes": [
+          "After playback attempts fail, the player keeps trying the next tracks until one plays or the queue runs out.",
+          "An audio loading timeout no longer prevents skipping to the next track."
+        ]
+      }
+    },
+    {
       "version": "0.4.26",
       "ru": {
         "title": "Музыка продолжается после ошибки трека",
