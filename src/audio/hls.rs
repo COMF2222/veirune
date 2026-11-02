@@ -276,6 +276,11 @@ impl HlsDownloader {
 
 fn audio_response(response: reqwest::Response) -> Result<reqwest::Response> {
     let status = response.status();
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let retry_after_ms = response.headers().get("Retry-After").and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok()).map(|seconds| seconds.saturating_mul(1000));
+        return Err(crate::api::error::ApiError::RateLimited {retry_after_ms}.into());
+    }
     let path = response.url().path();
     let ticket = |value: &str| value.len() == 43
         && value.bytes().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'_' | b'-'));

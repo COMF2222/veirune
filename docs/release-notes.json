@@ -2,6 +2,23 @@
   "schema": 1,
   "releases": [
     {
+      "version": "0.4.28",
+      "ru": {
+        "title": "Надёжнее продолжаем воспроизведение",
+        "changes": [
+          "Исправлен автопропуск треков, к которым SoundCloud не предоставляет доступ.",
+          "После временного ограничения запросов и пополнения волны музыка продолжается автоматически."
+        ]
+      },
+      "en": {
+        "title": "More reliable playback continuation",
+        "changes": [
+          "Fixed automatic skipping of tracks that SoundCloud does not make available.",
+          "Playback resumes automatically after a temporary request limit or radio queue refill."
+        ]
+      }
+    },
+    {
       "version": "0.4.27",
       "ru": {
         "title": "Пропуск недоступных треков",

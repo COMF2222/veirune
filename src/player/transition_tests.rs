@@ -11,6 +11,42 @@ struct AacFixture {
     lost_tickets: Arc<std::sync::atomic::AtomicUsize>,
 }
 
+#[tokio::test]
+async fn a_request_limit_automatically_resumes_real_audio_after_the_delay() {
+    let fixture = aac_fixture().await;
+    let player = &fixture.player;
+    player.handle_playback_failure(0, &crate::api::error::ApiError::RateLimited {retry_after_ms:Some(1000)}.into());
+    assert!(player.state.lock().loading);
+    assert_eq!(fixture.resolves.load(Ordering::Acquire), 0);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !player.state.lock().loading { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    let state = player.state.lock();
+    assert!(state.is_playing && state.error.is_none(), "{:?}", state.error);
+    assert_eq!(state.current, Some(0));
+    assert!(state.sample_rate > 0 && player.output.buffered_ms() >= 3000);
+    assert_eq!(fixture.resolves.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test]
+async fn pausing_during_a_request_limit_cancels_automatic_resume() {
+    let fixture = aac_fixture().await;
+    let player = &fixture.player;
+    player.handle_playback_failure(0, &crate::api::error::ApiError::RateLimited {retry_after_ms:Some(1000)}.into());
+    player.pause();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !player.state.lock().loading { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    assert!(!player.state.lock().is_playing);
+    assert_eq!(fixture.resolves.load(Ordering::Acquire), 0);
+}
+
 impl Drop for AacFixture {
     fn drop(&mut self) {
         self.player.shutdown();

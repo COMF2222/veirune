@@ -210,12 +210,28 @@ impl ApiClient {
                     *self.media_unavailable_until.write() = Some(Instant::now() + Duration::from_secs(30));
                 }
                 Ok(response) if response.status() == reqwest::StatusCode::FORBIDDEN => {
-                    return Err(ApiError::Other(anyhow::anyhow!("Access to Veirune was disabled by the owner.")));
+                    let delay = response.headers().get("Retry-After").and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.parse::<u64>().ok()).map(|seconds| seconds.saturating_mul(1000));
+                    let body = response.text().await.unwrap_or_default();
+                    if body.to_ascii_lowercase().contains("disabled by the owner") {
+                        return Err(ApiError::Other(anyhow::anyhow!("Access to Veirune was disabled by the owner.")));
+                    }
+                    return Err(ApiError::from_http(403, body, delay));
                 }
                 Ok(response) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
                     return Err(ApiError::Unauthorized);
                 }
                 Ok(response) if response.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY => {}
+                Ok(response) if !response.status().is_success() => {
+                    let status = response.status().as_u16();
+                    let delay = response.headers().get("Retry-After").and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.parse::<u64>().ok()).map(|seconds| seconds.saturating_mul(1000));
+                    let error = ApiError::from_http(status, response.text().await.unwrap_or_default(), delay);
+                    if matches!(error, ApiError::RateLimited { .. }) {
+                        return Err(error);
+                    }
+                    *self.media_unavailable_until.write() = Some(Instant::now() + Duration::from_secs(30));
+                }
                 _ => {
                     // Avoid an eight-second pause on every song while a broker
                     // is offline or has not received the media update yet.
@@ -487,16 +503,11 @@ impl ApiClient {
                     .get("Retry-After")
                     .and_then(|v| v.to_str().ok())
                     .and_then(|v| v.parse::<u64>().ok());
-                let wait_ms = retry_after.map(|s| s * 1000).unwrap_or(2000u64).min(30_000);
+                let wait_ms = retry_after.map(|s| s.saturating_mul(1000)).unwrap_or(30_000).clamp(1000, 86_400_000);
                 self.activity.rate_limited(Duration::from_millis(wait_ms));
-                attempt += 1;
-                if attempt > 3 {
-                    return Err(ApiError::RateLimited {
-                        retry_after_ms: Some(wait_ms),
-                    });
-                }
-                tokio::time::sleep(Duration::from_millis(wait_ms)).await;
-                continue;
+                // Playback owns delayed recovery. Holding this request open
+                // for repeated 429s hides the limit from the queue controller.
+                return Err(ApiError::RateLimited {retry_after_ms:Some(wait_ms)});
             }
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 return Err(ApiError::Unauthorized);
@@ -515,10 +526,9 @@ impl ApiClient {
                 continue;
             }
             if !status.is_success() {
-                return Err(ApiError::Http {
-                    status: status.as_u16(),
-                    body: resp.text().await.unwrap_or_default(),
-                });
+                let delay = resp.headers().get("Retry-After").and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<u64>().ok()).map(|seconds| seconds.saturating_mul(1000));
+                return Err(ApiError::from_http(status.as_u16(), resp.text().await.unwrap_or_default(), delay));
             }
             let result = match resp.bytes().await {
                 Ok(bytes) => decode_response(&bytes),
@@ -627,6 +637,42 @@ pub fn from_settings(settings: &Settings, demo: bool) -> SharedClient {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn media_resolution_distinguishes_track_denial_quota_and_owner_denial() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (status, body, kind) in [
+            (403, r#"{"error":"Track unavailable"}"#, "track"),
+            (403, r#"{"error":"Access to Fastcloud was disabled by the owner"}"#, "owner"),
+            (403, r#"{"error":"Rate limit exceeded"}"#, "quota"),
+            (502, r#"{"error":"SoundCloud returned HTTP 429: rate limit"}"#, "quota"),
+            (429, r#"{"error":"Slow down"}"#, "quota"),
+            (422, "{}", "relay-quota"),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let client = Arc::new(ApiClient::new(None, false));
+            let _session = crate::auth::Session::with_test_user(crate::auth::AppCredentials {
+                client_id:"test".into(), client_secret:String::new(), redirect_uri:String::new(),
+                server_url:Some(format!("http://{}", listener.local_addr().unwrap())),
+            }, client.clone()).await;
+            let server = tokio::spawn(async move {
+                let responses = if status == 422 {vec![(422,body),(429,r#"{"error":"Slow down"}"#)]} else {vec![(status,body)]};
+                for (status,body) in responses {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut request = [0;8192]; socket.read(&mut request).await.unwrap();
+                    let reply = format!("HTTP/1.1 {status} Fixture\r\nRetry-After: 12\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());
+                    socket.write_all(reply.as_bytes()).await.unwrap();
+                }
+            });
+            let error = tokio::time::timeout(Duration::from_secs(5),client.playback_streams("soundcloud:tracks:42")).await.unwrap().unwrap_err();
+            match kind {
+                "track" => assert!(matches!(error, ApiError::Http {status:403,..})),
+                "owner" => assert!(matches!(error, ApiError::Other(_))),
+                _ => assert!(matches!(error, ApiError::RateLimited {retry_after_ms:Some(12000)})),
+            }
+            server.await.unwrap();
+        }
+    }
+
     use super::*;
 
     #[test]
