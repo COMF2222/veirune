@@ -11,47 +11,36 @@ struct AacFixture {
     lost_tickets: Arc<std::sync::atomic::AtomicUsize>,
 }
 
-#[tokio::test]
-async fn a_request_limit_automatically_resumes_real_audio_after_the_delay() {
-    let fixture = aac_fixture().await;
-    let player = &fixture.player;
-    player.handle_playback_failure(0, &crate::api::error::ApiError::RateLimited {retry_after_ms:Some(1000)}.into());
-    assert!(player.state.lock().loading);
-    assert_eq!(fixture.resolves.load(Ordering::Acquire), 0);
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if !player.state.lock().loading { break; }
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
-    let state = player.state.lock();
-    assert!(state.is_playing && state.error.is_none(), "{:?}", state.error);
-    assert_eq!(state.current, Some(0));
-    assert!(state.sample_rate > 0 && player.output.buffered_ms() >= 3000);
-    assert_eq!(fixture.resolves.load(Ordering::Acquire), 1);
-}
-
-#[tokio::test]
-async fn pausing_during_a_request_limit_cancels_automatic_resume() {
-    let fixture = aac_fixture().await;
-    let player = &fixture.player;
-    player.handle_playback_failure(0, &crate::api::error::ApiError::RateLimited {retry_after_ms:Some(1000)}.into());
-    player.pause();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if !player.state.lock().loading { break; }
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
-    assert!(!player.state.lock().is_playing);
-    assert_eq!(fixture.resolves.load(Ordering::Acquire), 0);
-}
-
 impl Drop for AacFixture {
     fn drop(&mut self) {
         self.player.shutdown();
         self.server.abort();
     }
+}
+
+#[tokio::test]
+async fn an_hls_preview_is_skipped_instead_of_playing_thirty_seconds() {
+    let fixture = aac_fixture().await;
+    let player = &fixture.player;
+    let track = {
+        let mut state = player.state.lock();
+        state.queue[0].access = Some("preview".into());
+        state.queue[0].full_duration_ms = Some(180000);
+        state.queue[0].clone()
+    };
+    player.load_track(track, 0);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let ready = { let state=player.state.lock(); state.current==Some(1) && !state.loading };
+            if ready { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    let state = player.state.lock();
+    assert!(state.is_playing && state.error.is_none());
+    assert!(!state.preview_fallback);
+    assert!(state.sample_rate > 0);
+    assert_eq!(fixture.resolves.load(Ordering::Acquire), 2);
 }
 
 async fn aac_fixture() -> AacFixture {
@@ -235,11 +224,12 @@ async fn player_loop_automatically_crossfades_into_real_aac_audio_for_eight_seco
 
 
 #[tokio::test]
-async fn broker_restart_renews_audio_and_resumes_the_same_track_without_sign_in() {
+async fn a_lost_audio_link_skips_to_the_next_track_without_retrying_the_failed_track() {
     for status in [401, 410] {
         let fixture = aac_fixture().await;
         let player = &fixture.player;
         player.set_audio_preferences(false, 0, false);
+        player.state.lock().queue[0].duration_ms = Some(16000);
         let track = player.state.lock().queue[0].clone();
         player.load_track(track.clone(), 4000);
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -249,6 +239,14 @@ async fn broker_restart_renews_audio_and_resumes_the_same_track_without_sign_in(
         }).await.unwrap();
         assert!(player.state.lock().error.is_none());
         fixture.restart_status.store(status, Ordering::Release);
+        // Replace any successfully prefetched tail so this exercise cannot
+        // depend on whether the fixture happened to download ahead quickly.
+        {
+            let mut slot = player.decoder.lock();
+            slot.prefetch.take();
+            let remaining = slot.playlist.as_ref().unwrap().segments[slot.segments_fetched..].to_vec();
+            slot.prefetch = Some(player.hls.prefetch(slot.urn.clone(), remaining, &player.rt));
+        }
         let runner = tokio::spawn(player.clone().run());
         tokio::time::timeout(Duration::from_secs(8), async {
             loop {
@@ -257,13 +255,14 @@ async fn broker_restart_renews_audio_and_resumes_the_same_track_without_sign_in(
                 player.output.render_test_audio(4800);
                 tokio::time::sleep(Duration::from_millis(30)).await;
             }
-        }).await.expect("A lost playback ticket must resolve and resume automatically");
+        }).await.expect("A failed audio link must advance to the next track");
         assert!(fixture.lost_tickets.load(Ordering::Acquire) > 0);
         {
             let state = player.state.lock();
-            assert_eq!(state.queue[state.current.unwrap()].id, track.id);
+            assert_eq!(state.current, Some(1));
+            assert_ne!(state.queue[state.current.unwrap()].id, track.id);
             assert!(state.is_playing && state.error.is_none(), "{:?}", state.error);
-            assert!(state.position_ms >= 4000, "The track must resume rather than restart");
+            assert_eq!(fixture.resolves.load(Ordering::Acquire), 2, "Each track gets one load attempt");
         }
         assert!(player.output.render_test_audio(4800).iter().any(|sample| sample.abs() > 0.05));
         assert!(!fixture.server.is_finished());

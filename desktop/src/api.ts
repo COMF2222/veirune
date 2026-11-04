@@ -257,7 +257,13 @@ export const api = {
       ? cachedLibraryData(`playlists:${view}`, () => invoke<Data<Playlist[]>>('playlists', { view, query }))
       : invoke<Data<Playlist[]>>('playlists', { view, query }),
   catalogReleases: (day: number) => preview ? Promise.resolve<Data<Playlist[]>>({ status: 'ready', data: previewPlaylists }) : invoke<Data<Playlist[]>>('catalog_releases', { day }),
-  users: (query: string) => preview ? Promise.resolve<Data<User[]>>({ status: 'ready', data: previewUsers.filter(user => user.username.toLowerCase().includes(query.toLowerCase())) }) : invoke<Data<User[]>>('users', { query }),
+  users: async (query: string): Promise<Data<User[]>> => {
+    const result = preview
+      ? { status: 'ready' as const, data: previewUsers.filter(user => user.username.toLowerCase().includes(query.toLowerCase())) }
+      : await invoke<Data<User[]>>('users', { query })
+    if (result.status !== 'ready') return result
+    return { ...result, data: [...result.data].sort((a, b) => (b.followers_count || 0) - (a.followers_count || 0)) }
+  },
   track: (id: number) => preview ? Promise.resolve<Data<Track>>(demo.find(track => track.id === id) ? { status: 'ready', data: demo.find(track => track.id === id)! } : { status: 'failed', data: previewText('Трек не найден', 'Track not found') }) : invoke<Data<Track>>('track_detail', { id }),
   user: (id: number) => preview ? Promise.resolve<Data<User>>(previewUsers.find(user => user.id === id) ? { status: 'ready', data: { ...previewUsers.find(user => user.id === id)!, description: previewText('Здесь можно посмотреть, как будут выглядеть треки, альбомы и плейлисты твоего профиля.', 'Preview how tracks, albums and playlists will look on your profile.') } } : { status: 'failed', data: previewText('Автор не найден', 'Artist not found') }) : invoke<Data<User>>('user_detail', { id }),
   playlist: (id: number) => preview ? Promise.resolve<Data<Playlist>>(previewPlaylists.find(list => list.id === id) ? { status: 'ready', data: previewPlaylists.find(list => list.id === id)! } : { status: 'failed', data: previewText('Плейлист не найден', 'Playlist not found') }) : invoke<Data<Playlist>>('playlist_detail', { id }),

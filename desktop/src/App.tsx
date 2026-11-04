@@ -1,6 +1,6 @@
 import { listenerLabel } from './communityLabels'
 import { CommunityHomeSection, EditorialButton } from './CommunityDiscovery'
-import { Fragment, createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Fragment, createContext, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import * as Dialog from '@radix-ui/react-dialog'
 import * as Slider from '@radix-ui/react-slider'
@@ -105,13 +105,28 @@ export function Status<T>({ value, children }: { value?: Data<T>; children: (row
   return <>{children(value.data)}</>
 }
 
-export function TrackRows({ tracks, listenerCounts, compact = false, activeIndex, onPlay, recommended = false }: { tracks: Track[]; listenerCounts?: Record<number,number>; compact?: boolean; activeIndex?: number; onPlay?: (index: number) => Promise<void>; recommended?: boolean }) {
+export function TrackRows({ tracks, listenerCounts, compact = false, activeIndex, onPlay, recommended = false, editorialRemovableIds, onRemoveEditorial, editorialBusy = false }: { tracks: Track[]; listenerCounts?: Record<number,number>; compact?: boolean; activeIndex?: number; onPlay?: (index: number) => Promise<void>; recommended?: boolean; editorialRemovableIds?: readonly number[]; onRemoveEditorial?: (id: number) => Promise<void>; editorialBusy?: boolean }) {
   const queryClient = useQueryClient()
   const { data: playback } = useQuery({
     queryKey: ['player'], queryFn: api.player,
     select: state => ({ id: state.current == null ? undefined : state.queue[state.current]?.id, playing: state.isPlaying, loading: state.loading }),
   })
   const [menu, setMenu] = useState<number | null>(null)
+  const menuPrefix = useId()
+  const menuRoot = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (menu === null) return
+    const outside = (event: PointerEvent) => { if (!menuRoot.current?.contains(event.target as Node)) setMenu(null) }
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault(); event.stopPropagation()
+      menuRoot.current?.querySelector<HTMLButtonElement>('[data-menu-trigger]')?.focus()
+      setMenu(null)
+    }
+    document.addEventListener('pointerdown', outside)
+    document.addEventListener('keydown', escape)
+    return () => { document.removeEventListener('pointerdown', outside); document.removeEventListener('keydown', escape) }
+  }, [menu])
   const [error, setError] = useState('')
   const [selected, setSelected] = useState<Set<number>>(() => new Set())
   const [bulkBusy, setBulkBusy] = useState(false)
@@ -240,12 +255,12 @@ export function TrackRows({ tracks, listenerCounts, compact = false, activeIndex
       </div>
       <span className="track-genre">{track.genre || t('Трек', 'Track')}</span>
       <span className="track-duration">{duration(track.full_duration_ms || track.duration)}</span>
-      <div className="track-actions">
+      <div className="track-actions" ref={menu === track.id ? menuRoot : undefined}>
         {editablePlaylistId && <div className="queue-order"><button className="icon-button" disabled={index === 0} aria-label={`${t('Поднять', 'Move up')} ${track.title}`} onClick={() => void moveInPlaylist(index, index - 1)}><ArrowUp size={14} /></button><button className="icon-button" disabled={index === tracks.length - 1} aria-label={`${t('Опустить', 'Move down')} ${track.title}`} onClick={() => void moveInPlaylist(index, index + 1)}><ArrowDown size={14} /></button></div>}
         <button className={`icon-button ${isLiked(track.id) ? 'on' : ''}`} aria-label={isLiked(track.id) ? `${t('Убрать лайк', 'Unlike')}: ${track.title}` : `${t('Нравится', 'Like')}: ${track.title}`} title={isLiked(track.id) ? t('Убрать из понравившегося', 'Remove from likes') : t('Добавить в понравившееся', 'Add to likes')} onClick={() => void like(track)}><Heart size={17} fill={isLiked(track.id) ? 'currentColor' : 'none'} /></button>
         <ShareButton item={track} english={english} />
-        <button className="icon-button" aria-label={`${t('Действия с', 'Actions for')} ${track.title}`} onClick={() => setMenu(menu === track.id ? null : track.id)}><MoreHorizontal size={19} /></button>
-        {menu === track.id && <div className="row-menu"><button onClick={() => { setMenu(null); void api.station([track], 'track').then(() => queryClient.invalidateQueries({ queryKey: ['player'] })).catch(() => setError(t('Не удалось запустить волну', 'Could not start radio'))) }}><Disc3 size={15} /> {t('Волна по треку', 'Track radio')}</button><button onClick={() => { useApp.getState().openTrack(track.id, track.title); setMenu(null) }}><Music2 size={15} /> {t('Открыть трек', 'Open track')}</button><button onClick={() => { void api.enqueue(track); setMenu(null); void queryClient.invalidateQueries({ queryKey: ['player'] }) }}><Plus size={15} /> {t('В конец очереди', 'Add to queue')}</button><button onClick={() => { void api.enqueue(track, true); setMenu(null); void queryClient.invalidateQueries({ queryKey: ['player'] }) }}><ListMusic size={15} /> {t('Следующим', 'Play next')}</button><button onClick={() => void toggleRepost(track)} disabled={repostedTracks?.status !== 'ready'}><Repeat2 size={15} /> {repostedTracks?.status === 'ready' && repostedTracks.data.some(item => item.id === track.id) ? t('Убрать репост', 'Remove repost') : t('Репост', 'Repost')}</button><button onClick={() => setPlaylistMenu(playlistMenu === track.id ? null : track.id)}><Plus size={15} /> {t('Добавить в плейлист', 'Add to playlist')}</button>{playlistMenu === track.id && <div className="menu-subsection">{ownPlaylists?.status === 'ready' && ownPlaylists.data.map(list => <button key={list.id} onClick={() => void addToPlaylist(track, list.id)}>{list.title}</button>)}<form onSubmit={event => { event.preventDefault(); if (newPlaylist.trim()) void addToPlaylist(track) }}><input aria-label={t('Новый плейлист', 'New playlist')} placeholder={t('Новый плейлист', 'New playlist')} value={newPlaylist} onChange={event => setNewPlaylist(event.target.value)} /><button type="submit" disabled={!newPlaylist.trim()}>{t('Создать', 'Create')}</button></form></div>}{editablePlaylistId && <button onClick={() => void removeFromPlaylist(track)}><X size={15} /> {t('Удалить из плейлиста', 'Remove from playlist')}</button>}</div>}
+        <button className="icon-button" data-menu-trigger aria-expanded={menu === track.id} aria-controls={menu === track.id ? `${menuPrefix}-${track.id}` : undefined} aria-label={`${t('Действия с', 'Actions for')} ${track.title}`} onClick={() => setMenu(menu === track.id ? null : track.id)}><MoreHorizontal size={19} /></button>
+        {menu === track.id && <div className="row-menu" id={`${menuPrefix}-${track.id}`}><button onClick={() => { setMenu(null); void api.station([track], 'track').then(() => queryClient.invalidateQueries({ queryKey: ['player'] })).catch(() => setError(t('Не удалось запустить волну', 'Could not start radio'))) }}><Disc3 size={15} /> {t('Волна по треку', 'Track radio')}</button><button onClick={() => { useApp.getState().openTrack(track.id, track.title); setMenu(null) }}><Music2 size={15} /> {t('Открыть трек', 'Open track')}</button><button onClick={() => { void api.enqueue(track); setMenu(null); void queryClient.invalidateQueries({ queryKey: ['player'] }) }}><Plus size={15} /> {t('В конец очереди', 'Add to queue')}</button><button onClick={() => { void api.enqueue(track, true); setMenu(null); void queryClient.invalidateQueries({ queryKey: ['player'] }) }}><ListMusic size={15} /> {t('Следующим', 'Play next')}</button><button onClick={() => void toggleRepost(track)} disabled={repostedTracks?.status !== 'ready'}><Repeat2 size={15} /> {repostedTracks?.status === 'ready' && repostedTracks.data.some(item => item.id === track.id) ? t('Убрать репост', 'Remove repost') : t('Репост', 'Repost')}</button><button onClick={() => setPlaylistMenu(playlistMenu === track.id ? null : track.id)}><Plus size={15} /> {t('Добавить в плейлист', 'Add to playlist')}</button>{playlistMenu === track.id && <div className="menu-subsection">{ownPlaylists?.status === 'ready' && ownPlaylists.data.map(list => <button key={list.id} onClick={() => void addToPlaylist(track, list.id)}>{list.title}</button>)}<form onSubmit={event => { event.preventDefault(); if (newPlaylist.trim()) void addToPlaylist(track) }}><input aria-label={t('Новый плейлист', 'New playlist')} placeholder={t('Новый плейлист', 'New playlist')} value={newPlaylist} onChange={event => setNewPlaylist(event.target.value)} /><button type="submit" disabled={!newPlaylist.trim()}>{t('Создать', 'Create')}</button></form></div>}{onRemoveEditorial && editorialRemovableIds?.includes(track.id) && <button disabled={editorialBusy} onClick={() => { setMenu(null); void onRemoveEditorial(track.id).catch(() => setError(t('Не удалось убрать трек.', 'Could not remove the track.'))) }}><X size={15} /> {t('Убрать из выбора редакции', 'Remove editorial pick')}</button>}{editablePlaylistId && <button onClick={() => void removeFromPlaylist(track)}><X size={15} /> {t('Удалить из плейлиста', 'Remove from playlist')}</button>}</div>}
       </div>
     </div> })}
     {virtual.end < tracks.length && <div className="virtual-spacer" style={{ height: (tracks.length - virtual.end) * rowHeight }} aria-hidden="true" />}

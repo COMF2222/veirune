@@ -177,20 +177,20 @@ impl ApiClient {
     /// Shared audio when a broker is configured, including the owner's account.
     /// Older brokers retain direct playback; an owner denial never falls back.
     pub async fn playback_streams(&self, urn: &str) -> Result<super::endpoints::StreamUrls> {
-        self.resolve_playback_streams(urn, Duration::from_secs(8)).await
+        self.resolve_playback_streams(urn, Duration::from_secs(8), false).await
     }
 
     /// A preview may need a first-time search for a verified full recording.
     /// Keep ordinary songs fast; the server stores shared matches for later plays.
     pub async fn playback_streams_for_track(&self, track: &super::models::Track) -> Result<super::endpoints::StreamUrls> {
         let timeout = Duration::from_secs(if track.is_snippet() { 40 } else { 8 });
-        self.resolve_playback_streams(&track.urn(), timeout).await
+        self.resolve_playback_streams(&track.urn(), timeout, track.is_snippet()).await
     }
 
-    async fn resolve_playback_streams(&self, urn: &str, timeout: Duration) -> Result<super::endpoints::StreamUrls> {
+    async fn resolve_playback_streams(&self, urn: &str, timeout: Duration, require_full: bool) -> Result<super::endpoints::StreamUrls> {
         let session = self.session.read().upgrade();
         let available = self.media_unavailable_until.read().is_none_or(|until| until <= Instant::now());
-        if available && !self.is_demo()
+        if (available || require_full) && !self.is_demo()
             && let Some(session) = session
             && let Some(server) = session.media_server_url()
         {

@@ -330,8 +330,6 @@ html[data-theme="light"] { --surface-base: #eff0f4; --surface-nav: #f9f9fb; --su
 .community-home h2 { margin-top: 24px; }
 .community-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 24px; }
 .community-heading h2 { margin: 0; }
-.editorial-manage { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
-.editorial-manage > p { width: 100%; color: var(--text-muted); }
 .editorial-button-wrap { position: relative; display: inline-flex; }
 .editorial-error { position: absolute; bottom: 100%; left: 0; width: 260px; max-width: 80vw; padding: 12px; z-index: 50; background: var(--surface-raised, #20232c); color: var(--text, #fff); border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
 .editorial-button-wrap button[aria-pressed="true"] { color: var(--accent); }

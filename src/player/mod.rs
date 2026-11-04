@@ -22,7 +22,6 @@ struct SleepTimer { deadline: Option<Instant>, track_id: Option<u64> }
 struct PreparedTrack { track: Track, decoder: DecoderSlot, samples: Vec<f32>, rate: u32, duration: u64, bitrate: u32, channels: u16 }
 struct PendingNext {
     generation: u64, id: u64, fade: u32, prepared: Option<PreparedTrack>,
-    attempts: u8, retry_at: Option<Instant>,
 }
 
 /// Decode enough before starting the audio device that network and scheduler
@@ -32,42 +31,10 @@ const START_BUFFER_MS: u64 = 3_000;
 const DECODE_BATCH_MS: u64 = 2_000;
 /// Refill before the audio device gets close enough to the end to underrun.
 const TARGET_BUFFER_MS: u64 = 8_000;
-// Two bounded preparation attempts must fit before the requested fade begins.
+// Prepare the next track before the requested fade begins.
 const TRANSITION_PREPARE_LEAD_MS: u64 = 45_000;
-const TRANSITION_RETRY_DELAY: Duration = Duration::from_secs(1);
 /// Coalesce slider events before serializing the queue and settings to disk.
 const CONTROL_SAVE_DELAY: Duration = Duration::from_millis(750);
-const PLAYBACK_RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(200), Duration::from_millis(500)];
-
-#[derive(Default)]
-struct RecoveryBudget { track_id: u64, attempts: u8, last_attempt: Option<Instant> }
-impl RecoveryBudget {
-    fn take(&mut self, track_id: u64, now: Instant) -> bool {
-        if self.track_id != track_id || self.last_attempt.is_some_and(|last| now.duration_since(last) > Duration::from_secs(60)) {
-            *self = Self { track_id, ..Self::default() };
-        }
-        if usize::from(self.attempts) >= PLAYBACK_RETRY_DELAYS.len() { return false; }
-        self.attempts += 1;
-        self.last_attempt = Some(now);
-        true
-    }
-}
-
-fn retryable_playback_error(error: &anyhow::Error) -> bool {
-    use crate::api::error::ApiError;
-    if let Some(api) = error.downcast_ref::<ApiError>() {
-        return matches!(api, ApiError::PlaybackLinkExpired | ApiError::Network(_) | ApiError::Json(_) | ApiError::Http { status: 500..=599, .. });
-    }
-    if let Some(http) = error.downcast_ref::<reqwest::Error>() {
-        return http.is_timeout() || http.is_connect() || http.is_body()
-            || http.status().is_some_and(|status| status.is_server_error());
-    }
-    let message = format!("{error:#}").to_lowercase();
-    !["401", "403", "404", "429", "no stream url", "no full stream", "stream is a preview", "stream has no audio", "blocked", "unavailable", "permission denied"]
-        .iter().any(|permanent| message.contains(permanent))
-        && ["stream", "decode", "probe", "timeout", "segment", "connect", "audio"]
-            .iter().any(|stage| message.contains(stage))
-}
 
 fn skippable_playback_error(error: &anyhow::Error) -> bool {
     use crate::api::error::ApiError;
@@ -96,6 +63,11 @@ fn next_after_failure(state: &PlayerState, failed: &mut Vec<u64>) -> Option<usiz
     let wrap = if state.repeat == RepeatMode::All { at } else { 0 };
     state.order[at + 1..].iter().chain(state.order[..wrap].iter()).copied()
         .find(|&index| state.queue.get(index).is_some_and(|track| !failed.contains(&track.id)))
+}
+
+fn is_preview_stream(track: &Track, duration_ms: u64) -> bool {
+    (track.is_snippet() && duration_ms <= 30_000)
+        || duration_ms.saturating_add(10_000) < track.effective_duration_ms()
 }
 
 fn offline_playlist_url(track_id: u64) -> Option<String> {
@@ -251,7 +223,6 @@ pub struct Player {
     sleep_timer: Mutex<Option<SleepTimer>>,
     queue_history: Mutex<VecDeque<QueueSnapshot>>,
     next_track: Mutex<Option<PendingNext>>,
-    recovery: Mutex<RecoveryBudget>,
     failed_tracks: Mutex<Vec<u64>>,
     failed_queue_generation: Mutex<Option<u64>>,
     pub state: Mutex<PlayerState>,
@@ -341,7 +312,6 @@ impl Player {
         Self {
             audio_preferences: Mutex::new(AudioPreferences { crossfade_ms: 0, gapless: true }),
             sleep_timer: Mutex::new(None), queue_history: Mutex::new(VecDeque::new()), next_track: Mutex::new(None),
-            recovery: Mutex::new(RecoveryBudget::default()),
             failed_tracks: Mutex::new(Vec::new()),
             failed_queue_generation: Mutex::new(None),
             state: Mutex::new(PlayerState::default()),
@@ -500,7 +470,7 @@ impl Player {
         self.hls.set_oauth(self.client.oauth_token());
         let playlist = self.hls.playlist(&url).await?;
         let duration = playlist.duration_ms().context("Empty transition stream")?;
-        anyhow::ensure!(duration.saturating_add(10000) >= track.effective_duration_ms(), "Transition stream is a preview");
+        anyhow::ensure!(!is_preview_stream(&track, duration), "Transition stream is a preview");
         let mut decoder = DecoderSlot::new(); decoder.urn = urn.clone(); decoder.stream_url = Some(url);
         decoder.reset_decoder(Some(if playlist.init_uri.is_some() { "audio/mp4".into() } else { "audio/mpeg".into() }));
         if let Some(init) = &playlist.init_uri {
@@ -529,13 +499,8 @@ impl Player {
         if remaining > u64::from(fade) + TRANSITION_PREPARE_LEAD_MS { return; }
         {
             let mut pending = self.next_track.lock();
-            if let Some(pending) = pending.as_mut().filter(|pending| pending.generation == generation && pending.id == track.id && pending.fade == fade) {
-                if pending.prepared.is_some() || pending.attempts >= 2 || pending.retry_at.is_none_or(|at| Instant::now() < at) { return; }
-                pending.attempts += 1;
-                pending.retry_at = None;
-            } else {
-                *pending = Some(PendingNext { generation, id: track.id, fade, prepared: None, attempts: 1, retry_at: None });
-            }
+            if pending.as_ref().is_some_and(|pending| pending.generation == generation && pending.id == track.id && pending.fade == fade) { return; }
+            *pending = Some(PendingNext { generation, id: track.id, fade, prepared: None });
         }
         let Some(me) = self.self_ref.lock().upgrade() else { return; };
         self.rt.spawn(async move {
@@ -543,19 +508,10 @@ impl Player {
             let result = tokio::time::timeout(Duration::from_secs(20),me.prepare_next(track,fade)).await;
             let mut pending = me.next_track.lock();
             if let Some(pending) = pending.as_mut().filter(|pending| pending.id == id && pending.generation == generation && pending.fade == fade && me.load_is_current(generation)) {
-                match result {
-                    Ok(Ok(prepared)) => pending.prepared = Some(prepared),
-                    failure => {
-                        let retryable = match failure {
-                            Ok(Err(error)) => retryable_playback_error(&error),
-                            Err(_) => true,
-                            Ok(Ok(_)) => false,
-                        };
-                        if retryable && pending.attempts < 2 {
-                            pending.retry_at = Some(Instant::now() + TRANSITION_RETRY_DELAY);
-                        }
-                        log::debug!("Next-track preparation failed; scheduled retry: {}", pending.retry_at.is_some());
-                    }
+                if let Ok(Ok(prepared)) = result {
+                    pending.prepared = Some(prepared);
+                } else {
+                    log::debug!("Next-track preparation failed");
                 }
             }
         });
@@ -1130,24 +1086,6 @@ impl Player {
         }
     }
 
-    fn recover_stream(&self, generation: u64, error: &anyhow::Error) -> bool {
-        if !self.load_is_current(generation) || !retryable_playback_error(error) { return false; }
-        let (track, position) = {
-            let state = self.state.lock();
-            if !state.is_playing { return false; }
-            let Some(track) = state.current.and_then(|index| state.queue.get(index)).cloned() else { return false; };
-            (track, visible_position_ms(self.output.position_ms(), state.duration_ms))
-        };
-        if !self.recovery.lock().take(track.id, Instant::now()) { return false; }
-        // A decoder failure can be caused by a bad cached response that passed
-        // the superficial transport check. Re-fetch that recording on recovery.
-        let message = format!("{error:#}").to_lowercase();
-        if message.contains("probe") || message.contains("decode") {
-            self.hls.cache.evict_track(&track.urn());
-        }
-        self.load_track_guarded(track, position, Some(generation))
-    }
-
     fn fail_current_load(&self, generation: u64, message: String) {
         let mut state = self.state.lock();
         if !self.load_is_current(generation) { return; }
@@ -1167,37 +1105,8 @@ impl Player {
             slot.failed = true;
             slot.exhausted = true;
         }
-        if self.wait_for_request_limit(generation, error) { return; }
         if skippable_playback_error(error) && self.start_track_load(None, 0, Some(generation)) { return; }
         self.fail_current_load(generation, playback_error_message(error));
-    }
-
-    fn wait_for_request_limit(&self, generation: u64, error: &anyhow::Error) -> bool {
-        let Some(crate::api::error::ApiError::RateLimited {retry_after_ms}) = error.downcast_ref() else { return false; };
-        let delay = Duration::from_millis(retry_after_ms.unwrap_or(30_000).clamp(1_000, 86_400_000));
-        let (track, position) = {
-            let mut state = self.state.lock();
-            if !self.load_is_current(generation) { return true; }
-            if !state.is_playing { return false; }
-            let Some(track) = state.current.and_then(|index| state.queue.get(index)).cloned() else { return false; };
-            state.loading = true;
-            state.error = Some(playback_error_message(error));
-            self.output.set_playing(false);
-            (track, state.position_ms)
-        };
-        self.client.activity().rate_limited(delay);
-        let weak = self.self_ref.lock().clone();
-        self.rt.spawn(async move {
-            tokio::time::sleep(delay).await;
-            let Some(player) = weak.upgrade() else { return; };
-            {
-                let mut state = player.state.lock();
-                if !player.load_is_current(generation) || *player.stop.lock() { return; }
-                if !state.is_playing { state.loading = false; return; }
-            }
-            player.load_track_guarded(track, position, Some(generation));
-        });
-        true
     }
 
     /// Stop playback and remove every queued track, including the persisted
@@ -1343,11 +1252,9 @@ impl Player {
             let mut st = self.state.lock();
             if expected.is_some_and(|generation| !self.load_is_current(generation) || !st.is_playing) { return false; }
             let track = if let Some(track) = track {
-                // Explicit play/next/retry starts a new failure sequence. An
-                // automatic stream recovery keeps the previous retry budget.
+                // An explicit playback action starts a new failure sequence.
                 if expected.is_none() {
                     self.failed_tracks.lock().clear();
-                    *self.recovery.lock() = RecoveryBudget::default();
                 }
                 track
             } else {
@@ -1421,27 +1328,8 @@ impl Player {
             return true;
         }
         me.rt.clone().spawn(async move {
-            let mut attempt = 0;
-            loop {
-                let result = me.load_track_async(track.clone(), start_ms, generation).await;
-                let Err(e) = result else { break; };
-                if !me.load_is_current(generation) { break; }
-                if attempt < PLAYBACK_RETRY_DELAYS.len() && me.state.lock().is_playing && retryable_playback_error(&e)
-                    && me.recovery.lock().take(track.id, Instant::now()) {
-                    let message = format!("{e:#}").to_lowercase();
-                    if message.contains("probe") || message.contains("decode") { me.hls.cache.evict_track(&track.urn()); }
-                    let delay = PLAYBACK_RETRY_DELAYS[attempt];
-                    attempt += 1;
-                    tokio::time::sleep(delay).await;
-                    if !me.load_is_current(generation) { break; }
-                    if !me.state.lock().is_playing {
-                        me.state.lock().loading = false;
-                        break;
-                    }
-                    continue;
-                }
-                me.handle_playback_failure(generation, &e);
-                break;
+            if let Err(error) = me.load_track_async(track, start_ms, generation).await {
+                me.handle_playback_failure(generation, &error);
             }
         });
         true
@@ -1469,8 +1357,8 @@ impl Player {
         }
         self.hls.set_oauth(self.client.oauth_token());
 
-        // The API offers HLS only (MP3 then AAC); `stream_url` is deprecated
-        // and preview-only, so a blocked/preview track falls back below.
+        // Only full HLS audio is playable. A failed full-recording lookup
+        // must skip the track rather than silently playing its preview.
         let chosen = offline_url.map(|url| (url, 160)).or_else(|| {
             streams
                 .as_ref()
@@ -1488,8 +1376,8 @@ impl Player {
         }
 
         let mut first_samples: Vec<f32>;
-        let mut decode_skip_ms = start_ms;
-        let mut output_start_ms = start_ms;
+        let decode_skip_ms: u64;
+        let output_start_ms: u64;
         let available_duration_ms: u64;
         let is_preview: bool;
         let source_rate: u32;
@@ -1507,7 +1395,8 @@ impl Player {
                 }
                 let duration_ms = pl.duration_ms().context("empty HLS playlist")?;
                 available_duration_ms = duration_ms;
-                is_preview = duration_ms.saturating_add(10_000) < track.effective_duration_ms();
+                is_preview = is_preview_stream(&track, duration_ms);
+                anyhow::ensure!(!is_preview, "No full stream available; SoundCloud stream is a preview");
                 output_start_ms = preview_seek_start(start_ms, duration_ms);
                 let is_fmp4 = pl.init_uri.is_some();
                 let (first_segment, segment_start_ms) = pl.seek_point(output_start_ms);
@@ -1597,34 +1486,8 @@ impl Player {
                 source_rate = rate;
                 channels = chans;
             }
-        } else if let Some(preview) = streams
-            .as_ref()
-            .and_then(|streams| streams.preview_mp3_128.clone())
-        {
-            // 30-second preview fallback.
-            let bytes = self.hls.segment(&urn, &preview).await?;
-            if !self.load_is_current(generation) {
-                return Ok(());
-            }
-            let (samples, rate, chans) =
-                crate::audio::decode::decode_all(bytes, Some("audio/mpeg"))?;
-            first_samples = samples;
-            source_rate = rate;
-            channels = chans;
-            let duration_ms = first_samples.len() as u64 / 2 * 1000 / u64::from(rate.max(1));
-            anyhow::ensure!(duration_ms > 0, "preview stream contained no audio");
-            available_duration_ms = duration_ms;
-            if start_ms >= duration_ms {
-                output_start_ms = preview_seek_start(start_ms, duration_ms);
-                decode_skip_ms = output_start_ms;
-            }
-            // The field names its own rate, as the full streams do.
-            bitrate_kbps = 128;
-            is_preview = true;
-            let mut slot = self.decoder.lock();
-            slot.is_preview = true;
         } else {
-            anyhow::bail!("no stream URL available");
+            anyhow::bail!("No full stream URL available");
         }
 
         if decode_skip_ms > 0 {
@@ -1805,7 +1668,6 @@ impl Player {
                         match self.fetch_and_append(cycle_generation, false).await {
                             Ok(()) => {},
                             Err(e) if self.load_is_current(cycle_generation) => {
-                                if self.recover_stream(cycle_generation, &e) { continue; }
                                 self.handle_playback_failure(cycle_generation, &e);
                             }
                             Err(_) => {}
@@ -1837,7 +1699,6 @@ impl Player {
                     }
                     DecodeAction::Fatal(why) => {
                         let error = anyhow::anyhow!("Playback stopped: {why}");
-                        if self.recover_stream(cycle_generation, &error) { continue; }
                         self.handle_playback_failure(cycle_generation, &error);
                     }
                 }
@@ -2213,7 +2074,7 @@ mod tests {
         { let mut state = player.state.lock(); state.is_playing = true; state.duration_ms = 10000; }
         player.output.start_track(vec![0.2;48000*2],48000,true,9000);
         let next = player.state.lock().queue[1].clone();
-        *player.next_track.lock() = Some(PendingNext { generation:0,id:next.id,fade:4000,attempts:1,retry_at:None,prepared:Some(PreparedTrack { duration: next.effective_duration_ms(), track: next.clone(),decoder:DecoderSlot::new(),samples:vec![0.3;48000*2*3],rate:48000,bitrate:160,channels:2 }) });
+        *player.next_track.lock() = Some(PendingNext { generation:0,id:next.id,fade:4000,prepared:Some(PreparedTrack { duration: next.effective_duration_ms(), track: next.clone(),decoder:DecoderSlot::new(),samples:vec![0.3;48000*2*3],rate:48000,bitrate:160,channels:2 }) });
         player.load_generation.store(1,Ordering::Release);
         assert!(!player.transition_ready(false)); assert_eq!(player.state.lock().current,Some(0));
         player.load_generation.store(0,Ordering::Release);
@@ -2233,8 +2094,7 @@ mod tests {
             // All remaining audio is decoded: eight seconds after position 22s.
             player.output.start_track(vec![0.2; 48000 * 2 * 8], 48000, true, 22000);
             let next = player.state.lock().queue[1].clone();
-            *player.next_track.lock() = Some(PendingNext { generation: 0, id: next.id, fade: 8000, attempts: 1, retry_at: None,
-                prepared: Some(PreparedTrack { duration: next.effective_duration_ms(), track: next,
+            *player.next_track.lock() = Some(PendingNext { generation: 0, id: next.id, fade: 8000, prepared: Some(PreparedTrack { duration: next.effective_duration_ms(), track: next,
                     decoder: DecoderSlot::new(), samples: vec![0.3; 48000 * 2 * 11], rate: 48000,
                     bitrate: 160, channels: 2 }) });
             assert!(player.transition_ready(false), "playlist duration {duration} must not suppress the fade");
@@ -2254,7 +2114,7 @@ mod tests {
         player.output.start_track(vec![0.2; 48000 * 2 * 4], 48000, true, 22000);
         let next = player.state.lock().queue[1].clone();
         *player.next_track.lock() = Some(PendingNext { generation: 0, id: next.id, fade: 8000,
-            attempts: 1, retry_at: None, prepared: Some(PreparedTrack {
+            prepared: Some(PreparedTrack {
                 duration: next.effective_duration_ms(), track: next, decoder: DecoderSlot::new(),
                 samples: vec![0.3; 48000 * 2 * 11], rate: 48000, bitrate: 160, channels: 2 }) });
         assert!(!player.transition_ready(false));
@@ -2264,61 +2124,17 @@ mod tests {
     }
 
     #[test]
-    fn transition_preparation_retries_once_then_uses_the_prepared_track() {
+    fn transition_preparation_does_not_restart_a_pending_or_failed_attempt() {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let player = improved_player_fixture(&runtime, dir.path().join("settings.json"));
         player.set_audio_preferences(false, 8000, false);
         { let mut state = player.state.lock(); state.is_playing = true; state.duration_ms = 30000; }
-        player.output.start_track(vec![0.2; 48000 * 2 * 8], 48000, true, 22000);
         let next = player.state.lock().queue[1].clone();
-        *player.next_track.lock() = Some(PendingNext { generation: 0, id: next.id, fade: 8000,
-            prepared: None, attempts: 1, retry_at: Some(Instant::now() - Duration::from_secs(1)) });
+        *player.next_track.lock() = Some(PendingNext { generation:0, id:next.id, fade:8000, prepared:None });
         player.prepare_transition();
-        runtime.block_on(async {
-            tokio::time::timeout(Duration::from_secs(3), async {
-                loop {
-                    if player.next_track.lock().as_ref().is_some_and(|next| next.prepared.is_some()) { break; }
-                    tokio::task::yield_now().await;
-                }
-            }).await.unwrap();
-        });
-        assert_eq!(player.next_track.lock().as_ref().unwrap().attempts, 2);
-        assert!(player.transition_ready(false));
-        assert_eq!(player.state.lock().current, Some(1));
-    }
-
-    #[test]
-    fn transition_preparation_does_not_retry_while_loading_or_after_two_attempts() {
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        for (attempts, retry_at) in [(1, None), (2, Some(Instant::now() - Duration::from_secs(1)))] {
-            let player = improved_player_fixture(&runtime, dir.path().join("settings.json"));
-            player.set_audio_preferences(false, 8000, false);
-            { let mut state = player.state.lock(); state.is_playing = true; state.duration_ms = 30000; }
-            let next = player.state.lock().queue[1].clone();
-            *player.next_track.lock() = Some(PendingNext { generation: 0, id: next.id, fade: 8000,
-                prepared: None, attempts, retry_at });
-            player.prepare_transition();
-            runtime.block_on(async { tokio::task::yield_now().await; });
-            let pending = player.next_track.lock();
-            let pending = pending.as_ref().unwrap();
-            assert_eq!(pending.attempts, attempts);
-            assert!(pending.prepared.is_none());
-        }
-    }
-
-    #[test]
-    fn recovery_is_bounded_and_permanent_failures_are_not_retried() {
-        let mut budget = RecoveryBudget::default();
-        let now = Instant::now();
-        for _ in 0..2 { assert!(budget.take(1, now)); }
-        assert!(!budget.take(1, now));
-        assert!(budget.take(2, now));
-        assert!(retryable_playback_error(&anyhow::anyhow!("probe audio stream")));
-        assert!(retryable_playback_error(&crate::api::error::ApiError::PlaybackLinkExpired.into()));
-        assert!(!retryable_playback_error(&crate::api::error::ApiError::Unauthorized.into()));
-        assert!(!retryable_playback_error(&anyhow::anyhow!("HTTP 403 stream")));
+        runtime.block_on(async { tokio::task::yield_now().await; });
+        assert!(player.next_track.lock().as_ref().unwrap().prepared.is_none());
     }
 
     fn failure_player(runtime: &tokio::runtime::Runtime, path: std::path::PathBuf) -> Arc<Player> {
@@ -2366,14 +2182,14 @@ mod tests {
     }
 
     #[test]
-    fn a_request_limit_waits_without_losing_play_intent_or_skipping_the_queue() {
+    fn a_request_limit_stops_without_retrying_or_skipping_the_queue() {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let folder = tempfile::tempdir().unwrap();
         let player = failure_player(&runtime, folder.path().join("settings.json"));
         player.handle_playback_failure(7, &crate::api::error::ApiError::RateLimited {retry_after_ms:Some(30000)}.into());
         let state = player.state.lock();
         assert_eq!(state.current, Some(1));
-        assert!(state.loading && state.is_playing);
+        assert!(!state.loading && !state.is_playing && state.error.is_some());
         assert!(player.failed_tracks.lock().is_empty());
     }
 
@@ -2465,7 +2281,6 @@ mod tests {
         assert_eq!(next_after_failure(&state, &mut failed), None);
         state.queue[1] = state.queue[0].clone(); state.current = Some(0); state.order = vec![0,1];
         assert_eq!(next_after_failure(&state, &mut Vec::new()), None);
-        assert!(PLAYBACK_RETRY_DELAYS.iter().copied().sum::<Duration>() < Duration::from_secs(1));
     }
 
     #[test]
@@ -2488,7 +2303,6 @@ mod tests {
         let folder = tempfile::tempdir().unwrap();
         let player = failure_player(&runtime, folder.path().join("settings.json"));
         let error = anyhow::Error::new(error).context("fetch playlist");
-        assert!(retryable_playback_error(&error));
         player.handle_playback_failure(7, &error);
         assert_eq!(player.state.lock().current, Some(4));
         assert!(player.state.lock().is_playing);
@@ -2532,7 +2346,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn audio_failures_retry_then_pass_five_broken_tracks_and_decode_the_next() {
+    async fn audio_failures_skip_five_broken_tracks_without_retry_and_decode_the_next() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let broker = format!("http://{}", listener.local_addr().unwrap());
@@ -2554,7 +2368,8 @@ mod tests {
         let bad_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = bad_requests.clone();
         let server = tokio::spawn(async move {
-            for _ in 0..28 {
+            let mut attempted = std::collections::HashSet::new();
+            for _ in 0..12 {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut request = Vec::new();
                 let header_end = loop {
@@ -2571,6 +2386,7 @@ mod tests {
                 }
                 let (status, body) = if headers.starts_with("post /v1/media/resolve ") {
                     let input: serde_json::Value = serde_json::from_slice(&request[header_end..]).unwrap();
+                    assert!(attempted.insert(input["urn"].as_str().unwrap().to_owned()), "A failed track must not be retried");
                     let ticket = if input["urn"] == "soundcloud:tracks:6" { "b" } else { "a" }.repeat(43);
                     if input["urn"] == "soundcloud:tracks:1" {
                         (403, br#"{"error":"Track unavailable. Sign in to SoundCloud to learn more."}"#.to_vec())
@@ -2608,7 +2424,7 @@ mod tests {
             }
         }).await.unwrap();
         let state = player.state.lock();
-        assert_eq!(bad_requests.load(Ordering::Relaxed), 12);
+        assert_eq!(bad_requests.load(Ordering::Relaxed), 4);
         assert_eq!(state.current, Some(5));
         assert!(state.is_playing && state.error.is_none(), "{:?}", state.error);
         assert_eq!(state.sample_rate, 44100);
@@ -2629,7 +2445,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recovery_cannot_restart_after_pause_or_overwrite_a_newer_track() {
+    async fn stale_audio_load_cannot_restart_after_pause_or_overwrite_a_newer_track() {
         let folder = tempfile::tempdir().unwrap();
         let player = Player::new(Arc::new(AudioOutput::silent([0.0; 10], 0.8)),
             Arc::new(crate::api::ApiClient::demo()), Arc::new(AudioCache::disabled()),
@@ -2641,13 +2457,11 @@ mod tests {
             state.queue = tracks[..2].to_vec(); state.current = Some(0); state.position_ms = 42_000;
             state.is_playing = false;
         }
-        assert!(!player.recover_stream(1, &anyhow::anyhow!("probe audio stream")));
         assert!(!player.load_track_guarded(tracks[0].clone(), 42_000, Some(1)));
         {
             let mut state = player.state.lock(); state.current = Some(1); state.is_playing = true;
             player.load_generation.store(2, Ordering::Release);
         }
-        assert!(!player.recover_stream(1, &anyhow::anyhow!("probe audio stream")));
         assert!(!player.load_track_guarded(tracks[0].clone(), 42_000, Some(1)));
         assert_eq!(player.state.lock().current, Some(1));
         assert!(!player.state.lock().loading);

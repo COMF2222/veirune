@@ -2,6 +2,29 @@
   "schema": 1,
   "releases": [
     {
+      "version": "0.4.29",
+      "ru": {
+        "title": "Удобнее искать и слушать музыку",
+        "changes": [
+          "Результаты поиска авторов отсортированы по числу подписчиков SoundCloud: от большего к меньшему.",
+          "Треки с ошибкой воспроизведения пропускаются сразу, без повторных попыток запуска.",
+          "Улучшен поиск полных версий вместо фрагментов Go+. Если полной версии нет, трек пропускается.",
+          "Удаление из выбора редакции перенесено в меню трека с тремя точками.",
+          "На паузе карточка прослушивания в Discord скрывается, чтобы счётчик времени не продолжал идти."
+        ]
+      },
+      "en": {
+        "title": "Easier music search and listening",
+        "changes": [
+          "Artist search results are sorted by SoundCloud follower count, from highest to lowest.",
+          "Tracks with playback errors are skipped immediately without retrying playback.",
+          "Improved full-recording searches for Go+ previews. Tracks are skipped when no full recording is available.",
+          "Removing an editorial pick is now in the track’s three-dot menu.",
+          "The Discord listening activity is hidden while paused so its elapsed timer does not keep running."
+        ]
+      }
+    },
+    {
       "version": "0.4.28",
       "ru": {
         "title": "Надёжнее продолжаем воспроизведение",

@@ -104,6 +104,9 @@ fn run(rx: Receiver<Command>) {
                     state.retry_delay = RETRY_INITIAL;
                 }
                 Command::Activity(track) => {
+                    if track.playing && state.latest.as_ref().is_none_or(|previous| !previous.playing) {
+                        state.retry_at = Instant::now();
+                    }
                     state.latest = Some(track);
                     let failed = state
                         .client
@@ -131,7 +134,7 @@ fn run(rx: Receiver<Command>) {
 
         if state.client.is_none()
             && state.client_id.is_some()
-            && state.latest.is_some()
+            && state.latest.as_ref().is_some_and(|track| track.playing)
             && Instant::now() >= state.retry_at
         {
             reconnect(&mut state);
@@ -175,39 +178,49 @@ fn close(client: &mut Option<DiscordIpcClient>) {
     }
 }
 
-fn set_activity(client: &mut DiscordIpcClient, track: &NowPlaying) -> Result<(), String> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-    let start = now.saturating_sub(track.elapsed_secs.max(0));
+fn activity_for(track: &NowPlaying, now_ms: i64) -> Option<Activity<'_>> {
+    // Discord can keep counting the activity session even without timestamps.
+    // Clear the listening activity on pause instead of publishing a paused song.
+    if !track.playing { return None; }
+    let start = now_ms.saturating_sub(track.elapsed_secs.max(0).saturating_mul(1000));
     let large_image = track.artwork_url.as_deref().unwrap_or("fastcloud");
     let mut activity = Activity::new()
         .activity_type(ActivityType::Listening)
         .details(&track.title)
-        .state(if track.playing {
-            &track.artist
-        } else {
-            "Paused"
-        })
-        .assets(Assets::new().large_image(large_image));
-    if track.playing {
-        let timestamps = Timestamps::new()
-            .start(start)
-            .end(start.saturating_add(track.duration_secs.max(0)));
-        activity = activity.timestamps(timestamps);
-    }
+        .state(&track.artist)
+        .assets(Assets::new().large_image(large_image))
+        .timestamps(Timestamps::new().start(start)
+            .end(start.saturating_add(track.duration_secs.max(0).saturating_mul(1000))));
     if let Some(url) = track.track_url.as_deref() {
         activity = activity.buttons(vec![Button::new("Listen on SoundCloud", url)]);
     }
-    client
-        .set_activity(activity)
-        .map_err(|error| error.to_string())
+    Some(activity)
+}
+
+fn set_activity(client: &mut DiscordIpcClient, track: &NowPlaying) -> Result<(), String> {
+    let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default()
+        .as_millis().min(i64::MAX as u128) as i64;
+    match activity_for(track, now_ms) {
+        Some(activity) => client.set_activity(activity),
+        None => client.clear_activity(),
+    }.map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pause_clears_the_activity_and_resume_uses_the_saved_position_in_milliseconds() {
+        let mut track = NowPlaying { title:"Song".into(), artist:"Artist".into(), artwork_url:None,
+            track_url:None, duration_secs:180, elapsed_secs:65, playing:false };
+        assert!(activity_for(&track, 1_800_000_000_000).is_none());
+        track.playing = true;
+        let value = serde_json::to_value(activity_for(&track, 1_800_000_000_000).unwrap()).unwrap();
+        assert_eq!(value["timestamps"]["start"], 1_799_999_935_000i64);
+        assert_eq!(value["timestamps"]["end"], 1_800_000_115_000i64);
+        assert_eq!(value["state"], "Artist");
+    }
 
     #[test]
     fn retry_delay_doubles_until_the_one_minute_cap() {

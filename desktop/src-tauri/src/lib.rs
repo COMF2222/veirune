@@ -770,7 +770,7 @@ async fn player_state(
                     track_url: track.permalink_url.clone(),
                     duration_secs: (current.duration_ms / 1000) as i64,
                     elapsed_secs: (current.position_ms / 1000) as i64,
-                    playing: current.is_playing,
+                    playing: current.is_playing && !current.loading,
                 });
                 *last_presence = Some(stamp);
             }

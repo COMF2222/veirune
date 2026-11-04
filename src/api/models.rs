@@ -159,10 +159,8 @@ impl Track {
     }
     /// Only a 30-second snippet is streamable.
     pub fn is_snippet(&self) -> bool {
-        matches!(
-            self.policy_name().to_ascii_lowercase().as_str(),
-            "snip" | "preview"
-        )
+        [self.access.as_deref(), self.policy.as_deref()].into_iter().flatten()
+            .any(|value| matches!(value.to_ascii_lowercase().as_str(), "snip" | "preview"))
     }
     /// Go+-exclusive release (needs a Go+ subscription on the user account).
     pub fn is_go_only(&self) -> bool {
@@ -554,6 +552,14 @@ pub enum StreamTarget {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_snip_policy_is_recognized_even_with_stale_playable_access() {
+        let track: super::Track = serde_json::from_value(serde_json::json!({
+            "id":1,"title":"Song","access":"playable","policy":"SNIP"
+        })).unwrap();
+        assert!(track.is_snippet());
+    }
+
     use super::*;
 
     #[test]

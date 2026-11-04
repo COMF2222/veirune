@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, Star, Trash2 } from 'lucide-react'
+import { Check, Star } from 'lucide-react'
 import { api } from './api'
 import { TrackRows } from './App'
 import type { CommunityRole, CommunityHome } from './communityTypes'
@@ -28,6 +28,14 @@ export function CommunityHomeSection({english=false}: {english?:boolean}) {
   const [period,setPeriod]=useState<'today'|'yesterday'|'week'>('today'),[busy,setBusy]=useState(false),[message,setMessage]=useState('')
   const rows=data?.[period]||[],picks=data?.editorial||[]
   const editablePicks=data?.role.canEdit?picks.filter(r=>r.pickedByMe||data.role.isOwner):[]
+  const removeEditorial = async (trackId: number) => {
+    if (busy || !editablePicks.some(row => row.trackId === trackId)) return
+    setBusy(true); setMessage('')
+    try {
+      await api.community('pick', { trackId, active: false })
+      await Promise.all([refetch(), client.invalidateQueries({ queryKey: ['community-role'] })])
+    } finally { setBusy(false) }
+  }
   return <section className="community-home" aria-label={t('Музыка сообщества','Community music')} aria-busy={isPending}>
     <h2>{t('Слушают в Veirune','Popular in Veirune')}</h2>
     <div className="tabs" role="group" aria-label={t('Период подборки','Discovery period')}>{([['today','Сегодня','Today'],['yesterday','Вчера','Yesterday'],['week','Неделя','Week']] as const).map(([key,ru,en])=><button key={key} className={key===period?'active':''} aria-pressed={period===key} onClick={()=>setPeriod(key)}>{t(ru,en)}</button>)}</div>
@@ -35,8 +43,7 @@ export function CommunityHomeSection({english=false}: {english?:boolean}) {
     {error?<p role="status">{t('Не удалось загрузить подборки.','Could not load collections.')} <button className="text-button" onClick={()=>void refetch()}>{t('Повторить','Retry')}</button></p>:<>
       {rows.length>0&&<TrackRows tracks={rows.map(r=>r.track)} listenerCounts={Object.fromEntries(rows.map(r=>[r.trackId,r.listeners||0]))}/>}
       <div className="community-heading"><h2>{t('Выбор редакции','Editors’ picks')}</h2>{picks.length>0&&<button className="secondary-button" onClick={() => void api.play(picks.map(row=>row.track),0).catch(()=>setMessage(t('Не удалось включить подборку.','Could not play this collection.')))}>{t('Слушать всё','Play all')}</button>}</div>
-      {picks.length>0&&<TrackRows tracks={picks.map(r=>r.track)}/>}
-      {editablePicks.length>0&&<div className="editorial-manage">{editablePicks.map(row=><button className="secondary-button" disabled={busy} key={row.trackId} onClick={()=>{setBusy(true);void api.community('pick',{trackId:row.trackId,active:false}).then(()=>Promise.all([refetch(),client.invalidateQueries({queryKey:['community-role']})])).catch(()=>setMessage(t('Не удалось убрать трек. Попробуй ещё раз.','Could not remove the track. Try again.'))).finally(()=>setBusy(false))}}><Trash2 size={16}/>{t('Убрать','Remove')}: {row.track.title}</button>)}</div>}
+      {picks.length>0&&<TrackRows tracks={picks.map(r=>r.track)} editorialRemovableIds={editablePicks.map(row=>row.trackId)} onRemoveEditorial={removeEditorial} editorialBusy={busy}/>}
       {message&&<p role="alert">{message}</p>}
     </>}
   </section>
