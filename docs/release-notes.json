@@ -2,6 +2,25 @@
   "schema": 1,
   "releases": [
     {
+      "version": "0.4.30",
+      "ru": {
+        "title": "Больше музыки без фрагментов",
+        "changes": [
+          "Добавлено воспроизведение полных потоков SoundCloud для части треков, которые раньше были доступны в приложении только как фрагменты.",
+          "Полные потоки работают в обычном плеере: с очередью, паузой и перемоткой.",
+          "Улучшена серверная подготовка музыки для повторных прослушиваний."
+        ]
+      },
+      "en": {
+        "title": "More music beyond previews",
+        "changes": [
+          "Added full SoundCloud stream playback for some tracks previously exposed as previews in the app.",
+          "Full streams use the regular player, including its queue, pause and seeking controls.",
+          "Improved server-side music preparation for repeat listening."
+        ]
+      }
+    },
+    {
       "version": "0.4.29",
       "ru": {
         "title": "Удобнее искать и слушать музыку",

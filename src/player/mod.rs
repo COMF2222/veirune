@@ -13,6 +13,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use std::collections::VecDeque;
+mod web;
+pub use web::WebPlaybackView;
 
 #[derive(Clone)]
 struct QueueSnapshot { queue: Vec<Track>, order: Vec<usize>, current: Option<usize>, position: u64, playing: bool, shuffle: bool, priority: Vec<usize> }
@@ -219,6 +221,8 @@ enum DecodeAction {
 
 /// Player engine: fetch HLS streams, decode in background, drive AudioOutput.
 pub struct Player {
+    web: Mutex<Option<web::WebSlot>>,
+    web_enabled: std::sync::atomic::AtomicBool,
     audio_preferences: Mutex<AudioPreferences>,
     sleep_timer: Mutex<Option<SleepTimer>>,
     queue_history: Mutex<VecDeque<QueueSnapshot>>,
@@ -310,6 +314,8 @@ impl Player {
         rt: tokio::runtime::Handle,
     ) -> Self {
         Self {
+            web: Mutex::new(None),
+            web_enabled: std::sync::atomic::AtomicBool::new(false),
             audio_preferences: Mutex::new(AudioPreferences { crossfade_ms: 0, gapless: true }),
             sleep_timer: Mutex::new(None), queue_history: Mutex::new(VecDeque::new()), next_track: Mutex::new(None),
             failed_tracks: Mutex::new(Vec::new()),
@@ -389,7 +395,10 @@ impl Player {
         if remaining == Some(0) {
             self.pause(); *self.sleep_timer.lock() = None; self.output.set_sleep_gain(1.0);
         } else {
-            let remaining = remaining.or_else(|| after_track.then(|| self.state.lock().duration_ms.saturating_sub(self.output.position_ms())));
+            let remaining = remaining.or_else(|| after_track.then(|| {
+                let state = self.state.lock();
+                state.duration_ms.saturating_sub(if self.web_is_active() {state.position_ms} else {self.output.position_ms()})
+            }));
             self.output.set_sleep_gain(remaining.map_or(1.0, |ms| (ms as f32 / 10000.0).min(1.0)));
         }
     }
@@ -495,6 +504,7 @@ impl Player {
     }
 
     fn prepare_transition(&self) {
+        if self.web_is_active() { return; }
         let Some((generation,_,track,remaining,fade)) = self.transition_candidate() else { self.next_track.lock().take(); return; };
         if remaining > u64::from(fade) + TRANSITION_PREPARE_LEAD_MS { return; }
         {
@@ -754,6 +764,7 @@ impl Player {
     /// Returns the track+offset to load, if a load is needed instead of a
     /// plain pause/play flip.
     fn resume_load(&self) -> Option<(Track, u64)> {
+        if self.web_is_active() { return None; }
         let st = self.state.lock();
         let idx = st.current?;
         if st.loading || self.output.buffered_ms() > 0 {
@@ -787,6 +798,7 @@ impl Player {
             st.is_playing
         };
         self.output.set_playing(playing);
+        if playing { self.touch_web(); }
         self.save_session();
     }
 
@@ -798,6 +810,7 @@ impl Player {
         let mut st = self.state.lock();
         st.is_playing = true;
         drop(st);
+        self.touch_web();
         self.output.set_playing(true);
         self.save_session();
     }
@@ -818,6 +831,7 @@ impl Player {
         *self.sleep_timer.lock() = None;
         self.output.set_sleep_gain(1.0);
         self.load_generation.fetch_add(1, Ordering::AcqRel);
+        self.web.lock().take();
         *self.decoder.lock() = DecoderSlot::new();
         let mut st = self.state.lock();
         st.is_playing = false;
@@ -1105,6 +1119,7 @@ impl Player {
             slot.failed = true;
             slot.exhausted = true;
         }
+        { let mut web = self.web.lock(); if web.as_ref().is_some_and(|slot| slot.generation == generation) { web.take(); } }
         if skippable_playback_error(error) && self.start_track_load(None, 0, Some(generation)) { return; }
         self.fail_current_load(generation, playback_error_message(error));
     }
@@ -1169,6 +1184,7 @@ impl Player {
     /// which is what made dragging the bar backwards jump to wherever the
     /// buffer happened to start.
     pub fn seek_ms(&self, ms: u64) {
+        if self.seek_web(ms) { self.save_session(); return; }
         let loading = {
             let mut st = self.state.lock();
             if st.preview_fallback && ms >= st.duration_ms {
@@ -1291,6 +1307,7 @@ impl Player {
             st.position_ms = start_ms;
             st.preview_fallback = false;
             st.duration_ms = track.effective_duration_ms();
+            self.web.lock().take();
             self.output.start_track(Vec::new(), self.output.device_sample_rate().max(1), false, start_ms);
             (track, generation)
         };
@@ -1328,7 +1345,14 @@ impl Player {
             return true;
         }
         me.rt.clone().spawn(async move {
-            if let Err(error) = me.load_track_async(track, start_ms, generation).await {
+            if let Err(error) = me.load_track_async(track.clone(), start_ms, generation).await {
+                if !track.is_snippet() && web::eligible(&error) {
+                    match me.load_web(&track,start_ms,generation).await {
+                        Ok(true) => return,
+                        Ok(false) => {},
+                        Err(web_error) => { me.handle_playback_failure(generation,&web_error); return; }
+                    }
+                }
                 me.handle_playback_failure(generation, &error);
             }
         });
@@ -1342,6 +1366,13 @@ impl Player {
     async fn load_track_async(&self, track: Track, start_ms: u64, generation: u64) -> Result<()> {
         let urn = track.urn();
         let offline_url = offline_playlist_url(track.id);
+        if offline_url.is_none() && track.is_snippet() {
+            match self.load_web(&track,start_ms,generation).await {
+                Ok(true) => return Ok(()),
+                Err(error) if !skippable_playback_error(&error) => return Err(error),
+                _ => {},
+            }
+        }
         let streams: Option<StreamUrls> = if offline_url.is_none() {
             Some(
                 self.client
@@ -1574,6 +1605,16 @@ impl Player {
             let cancel_wait = !*self.autoplay.lock() && self.failed_queue_generation.lock().is_some();
             if cancel_wait { self.pause(); }
             self.update_sleep_timer();
+            if self.web_is_active() {
+                self.web_watchdog();
+                self.publish_position();
+                if last_checkpoint.elapsed() >= Duration::from_secs(15) {
+                    last_checkpoint = Instant::now();
+                    self.save_session();
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
             self.prepare_transition();
             if self.transition_ready(false) { continue; }
             let buffered = self.output.buffered_ms();
@@ -1721,8 +1762,8 @@ impl Player {
     }
 
     fn publish_position(&self) {
-        let pos = self.output.position_ms();
         let mut st = self.state.lock();
+        let pos = if self.web_is_active() { st.position_ms } else { self.output.position_ms() };
         // A restored queue has no audio loaded yet. Keep its saved position
         // while paused; the output device still reports zero until Play.
         if !st.loading && st.is_playing {

@@ -72,6 +72,7 @@ export type Connection =
   | { status: 'pairing'; code: string; url: string }
   | { status: 'error'; message: string }
 export type PlayerState = {
+  webPlayback?: WebPlaybackView | null
   canUndoQueue: boolean
   sleepRemainingMs: number | null
   sleepAfterTrack: boolean
@@ -92,6 +93,15 @@ export type PlayerState = {
   bitrateKbps: number
   sampleRate: number
   error: string | null
+}
+export type WebPlaybackView = {
+  generation: number
+  source: { playlist_path: string; license_paths: Record<string,string>; duration_ms: number; bitrate_kbps: number }
+  playing: boolean
+  volume: number
+  speed: number
+  seekMs: number
+  seekRevision: number
 }
 export type OfflineEntry = { track: Track; bytes: number; pinned: boolean }
 export type PlaylistFolder = { name: string; playlistIds: number[]; pinned: boolean; order: number }

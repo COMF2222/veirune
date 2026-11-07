@@ -17,6 +17,7 @@ mod import_yandex;
 #[path = "../../../src/link.rs"]
 mod link;
 mod media;
+mod web_media;
 mod offline;
 mod appearance;
 mod diagnostics;
@@ -361,6 +362,7 @@ impl<T: Serialize> From<Slot<T>> for Data<T> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PlayerView {
+    web_playback: Option<player::WebPlaybackView>,
     can_undo_queue: bool,
     sleep_remaining_ms: Option<u64>,
     sleep_after_track: bool,
@@ -436,6 +438,7 @@ impl AppState {
                 rt.handle().clone(),
             ));
             player.attach();
+            player.enable_web_playback();
             player.set_autoplay(settings.autoplay);
             player.set_audio_preferences(settings.normalization, settings.crossfade_ms, settings.gapless);
             player.restore_controls(settings.volume, settings.balance, settings.mono);
@@ -738,6 +741,13 @@ fn shared_catalogue_lists_keep_the_json_array_contract() {
 }
 
 #[tauri::command]
+fn web_playback_report(state: tauri::State<'_, AppState>, generation: u64, event: String, position_ms: u64, seek_revision: Option<u64>) {
+    if matches!(event.as_str(),"ready"|"progress"|"playing"|"blocked"|"ended"|"failed"|"rate_limited") {
+        if let Some(player) = &state.player { player.web_report(generation,&event,position_ms,seek_revision); }
+    }
+}
+
+#[tauri::command]
 async fn player_state(
     state: tauri::State<'_, AppState>,
     known_queue_revision: Option<u64>,
@@ -749,6 +759,7 @@ async fn player_state(
     let discord_presence = state.settings.lock().discord_presence;
     let can_undo_queue = player.can_undo_queue();
     let (sleep_remaining_ms, sleep_after_track) = player.sleep_view();
+    let web_playback = player.web_view();
     let current = player.state.lock();
     if discord_presence {
         let mut last_presence = state.last_presence.lock();
@@ -780,6 +791,7 @@ async fn player_state(
     }
     let track_id = current.current.and_then(|index| current.queue.get(index)).map(|track| track.id);
     let mut view = PlayerView {
+        web_playback: web_playback.clone(),
         can_undo_queue,
         sleep_remaining_ms,
         sleep_after_track,
@@ -790,7 +802,7 @@ async fn player_state(
         is_playing: current.is_playing,
         loading: current.loading,
         // Read the audio cursor directly; the saved state is published at 10 Hz.
-        position_ms: if current.is_playing && !current.loading {
+        position_ms: if current.is_playing && !current.loading && web_playback.is_none() {
             let position = player.output.position_ms();
             if current.duration_ms > 0 { position.min(current.duration_ms) } else { position }
         } else { current.position_ms },
@@ -3613,6 +3625,7 @@ fn resize_player_window(
 pub fn run() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     tauri::Builder::default()
+        .register_asynchronous_uri_scheme_protocol("veirune-media",web_media::handle)
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -3855,6 +3868,7 @@ pub fn run() {
             my_profile,
             take_pending_link,
             player_state,
+            web_playback_report,
             image_data,
             waveform_samples,
             offline_tracks,

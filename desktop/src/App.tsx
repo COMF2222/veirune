@@ -1,4 +1,5 @@
 import { listenerLabel } from './communityLabels'
+import { useWebPlayback } from './useWebPlayback'
 import { CommunityHomeSection, EditorialButton } from './CommunityDiscovery'
 import { Fragment, createContext, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -1075,6 +1076,7 @@ function PlayerBar({ wallpaperUrl }: { wallpaperUrl: string | null }) {
 }
 
 export default function App() {
+  useWebPlayback()
   const queryClient = useQueryClient()
   const page = useApp(s => s.page)
   const search = useApp(s => s.search)

@@ -387,6 +387,7 @@ impl AudioOutput {
 
     pub fn set_normalization(&self, enabled: bool) { self.state.lock().normalization = enabled; }
     pub fn set_sleep_gain(&self, gain: f32) { self.state.lock().sleep_gain = gain.clamp(0.0,1.0); }
+    pub fn sleep_gain(&self) -> f32 { self.state.lock().sleep_gain }
 
     /// Append decoded samples for gapless continuation.
     /// Drains the consumed prefix first so long HLS sessions stay bounded

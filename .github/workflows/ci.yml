@@ -47,6 +47,8 @@ jobs:
         run: node --experimental-strip-types --test desktop/tests/appImprovements.test.ts desktop/tests/windowActions.test.ts desktop/tests/duration.test.ts desktop/tests/communityLabels.test.ts
       - name: Test lyrics timing
         run: node --experimental-strip-types --test desktop/tests/lyricsTiming.test.ts desktop/tests/waveGreeting.test.ts
+      - name: Test opaque DRM license envelopes
+        run: node --experimental-strip-types --test desktop/tests/webDrm.test.ts
       - name: Test application behavior, shared audio and lyrics
         # Test compilation also checks the app binary, replacing cargo check.
         run: cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked --all-targets

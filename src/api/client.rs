@@ -187,6 +187,48 @@ impl ApiClient {
         self.resolve_playback_streams(&track.urn(), timeout, track.is_snippet()).await
     }
 
+    pub async fn web_playback_source(&self, track: &super::models::Track) -> Result<Option<super::web_playback::WebPlaybackSource>> {
+        if self.is_demo() { return Ok(None); }
+        let session = self.session.read().upgrade();
+        let Some(session) = session else { return Ok(None) };
+        let Some(server) = session.media_server_url() else { return Ok(None) };
+        let token = session.access_token().await.map_err(ApiError::Other)?;
+        let response = self.http.post(format!("{server}/v1/media/web-resolve"))
+            .header(reqwest::header::AUTHORIZATION, format!("OAuth {token}"))
+            .timeout(Duration::from_secs(40)).json(&serde_json::json!({"urn":track.urn(),"drm":if cfg!(target_os="macos") {"fairplay"} else {"widevine"}})).send().await?;
+        let status = response.status().as_u16();
+        if matches!(status, 404 | 422) { return Ok(None); }
+        if !(200..300).contains(&status) {
+            return Err(ApiError::from_http(status,response.text().await.unwrap_or_default(),None));
+        }
+        let source: super::web_playback::WebPlaybackSource = response.json().await?;
+        if !source.valid() { return Err(ApiError::Bad("Invalid web playback capability".into())); }
+        Ok(Some(source))
+    }
+
+    /// Renderer transport is restricted to broker media capabilities. CDM
+    /// challenges and responses remain opaque and are never logged or saved.
+    pub async fn web_playback_resource(&self, path: &str, post: bool, body: Vec<u8>) -> Result<(u16, String, Vec<u8>)> {
+        if !super::web_playback::resource_path(path) || body.len() > 1024*1024
+            || post && !path.contains("/license/") && !path.ends_with("/started")
+        { return Err(ApiError::Bad("Unsupported playback resource".into())); }
+        let session = self.session.read().upgrade().ok_or(ApiError::Unauthorized)?;
+        let server = session.media_server_url().ok_or_else(|| ApiError::Bad("Playback server is unavailable".into()))?;
+        let request = self.http.request(if post {reqwest::Method::POST} else {reqwest::Method::GET},format!("{server}{path}"))
+            .timeout(Duration::from_secs(25)).header(reqwest::header::CONTENT_TYPE,"application/octet-stream");
+        let response = if post {request.body(body)} else {request}.send().await?;
+        let status = response.status().as_u16();
+        let mime = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|h| h.to_str().ok()).unwrap_or("application/octet-stream").to_owned();
+        if response.content_length().is_some_and(|length| length > 8*1024*1024) { return Err(ApiError::Bad("Playback resource is too large".into())); }
+        let mut response = response;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            if bytes.len().saturating_add(chunk.len()) > 8*1024*1024 { return Err(ApiError::Bad("Playback resource is too large".into())); }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok((status,mime,bytes))
+    }
+
     async fn resolve_playback_streams(&self, urn: &str, timeout: Duration, require_full: bool) -> Result<super::endpoints::StreamUrls> {
         let session = self.session.read().upgrade();
         let available = self.media_unavailable_until.read().is_none_or(|until| until <= Instant::now());
