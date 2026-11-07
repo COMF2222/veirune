@@ -2,6 +2,11 @@
 
 ## Licensed web playback (desktop 0.4.30 / Android 0.1.11)
 
+Desktop 0.4.31 shares the native squared volume curve with the CDM route. The
+previous linear HTML volume made a 1% setting 100 times louder than the same
+setting in the native mixer, even with normalization off. The same sleep-fade
+factor is then applied. PCM normalization/EQ remain separate limitations below.
+
 The Tauri player and Android Media3 player can request `/v1/media/web-resolve`
 when a public recording has no full official API stream. Known previews try
 this before the slower alternate-upload search. The broker verifies the current

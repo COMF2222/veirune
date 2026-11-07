@@ -32,6 +32,7 @@
 #![allow(dead_code)]
 
 pub mod register;
+pub mod endpoint;
 
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -188,7 +189,9 @@ impl AppCredentials {
     }
 
     pub async fn from_server(server_url: &str) -> Result<Self> {
-        let server_url = checked_server_url(server_url)?;
+        let requested = checked_server_url(server_url)?;
+        if requested.starts_with("https://") {let _=endpoint::refresh(false).await;}
+        let server_url = endpoint::current(&requested);
         let response = reqwest::Client::new()
             .get(format!("{server_url}/v1/config"))
             .send().await.context("contact approval server")?
@@ -199,7 +202,7 @@ impl AppCredentials {
         let redirect_uri = body["redirect_uri"].as_str().context("server returned no redirect URI")?;
         let creds = Self {
             client_id: client_id.to_owned(), client_secret: String::new(),
-            redirect_uri: redirect_uri.to_owned(), server_url: Some(server_url),
+            redirect_uri: redirect_uri.to_owned(), server_url: Some(if endpoint::managed(&requested) {CURRENT_SERVER_ORIGIN.to_owned()} else {server_url}),
         };
         let redirect = url::Url::parse(&creds.redirect_uri).context("invalid server OAuth redirect")?;
         anyhow::ensure!(redirect.scheme() == "http"
@@ -297,13 +300,13 @@ pub fn checked_server_url(value: &str) -> Result<String> {
 
 pub fn saved_server_url() -> Option<String> {
     read_secret(ADMIN_SERVER_ENTRY).or_else(|| read_secret(REMOTE_ENTRY))
-        .map(|origin| replacement_server_origin(&origin).map_or(origin.clone(),str::to_owned))
+        .map(|origin| endpoint::current(replacement_server_origin(&origin).unwrap_or(&origin)))
 }
 
 pub fn save_server_url(value: &str) -> Result<String> {
     let url = checked_server_url(value)?;
     write_secret(ADMIN_SERVER_ENTRY, &url)?;
-    Ok(url)
+    Ok(endpoint::current(&url))
 }
 
 fn read_secret(key: &str) -> Option<String> {
@@ -474,7 +477,7 @@ impl Session {
         session
     }
     pub fn media_server_url(&self) -> Option<String> {
-        self.creds.server_url.clone().or_else(|| {
+        self.creds.server_url.as_deref().map(endpoint::current).or_else(|| {
             saved_server_url().and_then(|value| checked_server_url(&value).ok())
         })
     }
@@ -713,6 +716,8 @@ async fn authorize_notifying(
 }
 
 async fn remote_token(server_url: &str, path: &str, body: &serde_json::Value) -> Result<Tokens> {
+    if endpoint::managed(server_url) { let _=endpoint::refresh(false).await; }
+    let server_url=endpoint::current(server_url);
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20)).build()?;
     let response = http.post(format!("{server_url}{path}"))

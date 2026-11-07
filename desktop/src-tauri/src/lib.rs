@@ -470,6 +470,26 @@ impl AppState {
                 None
             }
         };
+        {
+            let migrating_player=player.clone();
+            rt.spawn(async move {
+                let mut previous=auth::endpoint::current(auth::CURRENT_SERVER_ORIGIN);
+                loop {
+                    if let Some(saved)=auth::saved_server_url() {
+                        let _=auth::endpoint::refresh(false).await;
+                        let next=auth::endpoint::current(auth::CURRENT_SERVER_ORIGIN);
+                        if auth::endpoint::managed(&saved) && next!=previous {
+                            previous=next;
+                            if let Some(player)=migrating_player.as_ref() {player.backend_moved();}
+                        }
+                    }
+                    tokio::select! {
+                        _=tokio::time::sleep(std::time::Duration::from_secs(15))=>{},
+                        _=auth::endpoint::changed()=>{},
+                    }
+                }
+            });
+        }
         let presence = discord::Presence::spawn();
         if settings.discord_presence {
             presence.configure(Some(settings.discord_client_id.clone()));

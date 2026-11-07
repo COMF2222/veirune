@@ -9,6 +9,11 @@ use std::sync::Arc;
 const SOUNDCLOUD_NATIVE_SAMPLE_RATE: u32 = 44_100;
 const MAX_FALLBACK_SAMPLE_RATE: u32 = 48_000;
 
+/// Keep the perceived-volume curve identical for native and CDM playback.
+pub fn volume_gain(volume: f32) -> f32 {
+    volume.clamp(0.0, 1.0).powi(2)
+}
+
 fn preferred_output_sample_rate(min: u32, max: u32) -> u32 {
     if (min..=max).contains(&SOUNDCLOUD_NATIVE_SAMPLE_RATE) {
         SOUNDCLOUD_NATIVE_SAMPLE_RATE
@@ -171,7 +176,7 @@ impl OutputState {
         // A linear slider leaves the first few percent surprisingly loud.
         // Square the control value so the low end has useful precision, while
         // zero still produces exact silence.
-        let gain = self.volume.clamp(0.0, 1.0).powi(2);
+        let gain = volume_gain(self.volume);
         let left = gain * (1.0 - balance.max(0.0));
         let right = gain * (1.0 + balance.min(0.0));
         (left, right)

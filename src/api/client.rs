@@ -165,10 +165,9 @@ impl ApiClient {
     /// failure stays visible rather than silently using a blocked local route.
     pub async fn relay_credentials(&self) -> Result<Option<(String, String)>> {
         let session = self.session.read().upgrade();
-        if let Some(session) = session
-            && let Some(server) = session.media_server_url()
-        {
+        if let Some(session) = session && session.media_server_url().is_some() {
             let token = session.access_token().await.map_err(ApiError::Other)?;
+            let server=session.media_server_url().ok_or(ApiError::Unauthorized)?;
             return Ok(Some((server, token)));
         }
         Ok(None)
@@ -193,6 +192,7 @@ impl ApiClient {
         let Some(session) = session else { return Ok(None) };
         let Some(server) = session.media_server_url() else { return Ok(None) };
         let token = session.access_token().await.map_err(ApiError::Other)?;
+        let server=session.media_server_url().unwrap_or(server);
         let response = self.http.post(format!("{server}/v1/media/web-resolve"))
             .header(reqwest::header::AUTHORIZATION, format!("OAuth {token}"))
             .timeout(Duration::from_secs(40)).json(&serde_json::json!({"urn":track.urn(),"drm":if cfg!(target_os="macos") {"fairplay"} else {"widevine"}})).send().await?;
@@ -237,6 +237,7 @@ impl ApiClient {
             && let Some(server) = session.media_server_url()
         {
             let token = session.access_token().await.map_err(ApiError::Other)?;
+            let server=session.media_server_url().unwrap_or(server);
             let response = self.http.post(format!("{server}/v1/media/resolve"))
                 .header(reqwest::header::AUTHORIZATION, format!("OAuth {token}"))
                 .timeout(timeout)

@@ -62,7 +62,8 @@ impl Player {
             generation: slot.generation,
             source: slot.source.clone(),
             playing: state.is_playing,
-            volume: (state.volume * self.output.sleep_gain()).clamp(0.0, 1.0),
+            volume: (crate::audio::output::volume_gain(state.volume) * self.output.sleep_gain())
+                .clamp(0.0, 1.0),
             speed: state.playback_speed,
             seek_ms: slot.seek_ms,
             seek_revision: slot.seek_revision,
@@ -364,5 +365,43 @@ mod tests {
         player.web_report(5, "failed", 0, None);
         assert!(player.web_is_active());
         assert!(player.state.lock().is_playing);
+    }
+
+    #[test]
+    fn protected_audio_uses_the_same_quiet_volume_curve_and_sleep_fade() {
+        let (_directory, _runtime, player) = player();
+        player.state.lock().volume = 0.05;
+        assert!((player.web_view().unwrap().volume - 0.0025).abs() < 0.00001);
+        player.state.lock().volume = 0.5;
+        player.output.set_sleep_gain(0.4);
+        assert!((player.web_view().unwrap().volume - 0.1).abs() < 0.00001);
+    }
+
+    #[test]
+    fn backend_migration_keeps_a_paused_queue_and_position_without_reusing_old_tickets() {
+        let (_directory, _runtime, player) = player();
+        {
+            let mut state = player.state.lock();
+            state.position_ms = 42000;
+            state.is_playing = false;
+        }
+        let ids: Vec<_> = player
+            .state
+            .lock()
+            .queue
+            .iter()
+            .map(|track| track.id)
+            .collect();
+        player.backend_moved();
+        assert!(!player.web_is_active());
+        assert!(player.resume_load().is_some());
+        let state = player.state.lock();
+        assert_eq!(state.current, Some(0));
+        assert_eq!(state.position_ms, 42000);
+        assert_eq!(
+            state.queue.iter().map(|track| track.id).collect::<Vec<_>>(),
+            ids
+        );
+        assert!(!state.is_playing);
     }
 }

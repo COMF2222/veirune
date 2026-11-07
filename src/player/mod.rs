@@ -827,6 +827,24 @@ impl Player {
         self.save_session();
     }
 
+    /// A restored backend has no old media tickets. Preserve the queue and
+    /// position, but open a fresh source automatically on the verified origin.
+    pub fn backend_moved(&self) {
+        let snapshot = {
+            let state=self.state.lock();
+            (state.current.and_then(|index|state.queue.get(index)).cloned(),state.position_ms,state.is_playing || state.error.is_some())
+        };
+        let (Some(track),position,playing)=snapshot else {return};
+        if playing { self.load_track(track,position); }
+        else {
+            self.load_generation.fetch_add(1,Ordering::AcqRel);
+            self.web.lock().take();
+            *self.decoder.lock()=DecoderSlot::new();
+            self.output.start_track(Vec::new(),self.output.device_sample_rate().max(1),false,position);
+            self.state.lock().loading=false;
+        }
+    }
+
     pub fn stop(&self) {
         *self.sleep_timer.lock() = None;
         self.output.set_sleep_gain(1.0);

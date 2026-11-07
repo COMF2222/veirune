@@ -2,6 +2,23 @@
   "schema": 1,
   "releases": [
     {
+      "version": "0.4.31",
+      "ru": {
+        "title": "Ровная громкость и устойчивое подключение",
+        "changes": [
+          "Исправлена слишком высокая громкость полных потоков для треков, ранее доступных только как фрагменты.",
+          "Добавлено автоматическое получение проверенного адреса сервера и восстановление воспроизведения после переноса сервиса."
+        ]
+      },
+      "en": {
+        "title": "Consistent volume and resilient connections",
+        "changes": [
+          "Fixed excessive volume for full streams of tracks previously exposed as previews.",
+          "Added automatic verified server discovery and playback recovery after a service migration."
+        ]
+      }
+    },
+    {
       "version": "0.4.30",
       "ru": {
         "title": "Больше музыки без фрагментов",

@@ -1,6 +1,6 @@
 [package]
 name = "fastcloud"
-version = "0.4.30"
+version = "0.4.31"
 edition = "2024"
 description = "Native SoundCloud client"
 license = "MIT"
@@ -11,6 +11,7 @@ categories = ["multimedia::audio", "gui"]
 exclude = ["/images", "/docs", "/session-*.md"]
 
 [dependencies]
+ring = "=0.17.14"
 eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
 egui = "0.36"
 egui_extras = { version = "0.36", features = ["image", "svg"] }

@@ -1,0 +1,8 @@
+{
+  "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE5ZSfk2jPvDa2aKM33g0i7daXSpAbActP67qs4HToT2fZkbzGz9O2gE1Q/0hZ18XnBxXdLfT32JX88t260phtnw==",
+  "envelope": {
+    "schema": 1,
+    "payload": "eyJzZXJ2aWNlIjoidmVpcnVuZS1tYWluIiwic2VyaWFsIjoyLCJvcmlnaW4iOiJodHRwczovLzgwLjQ3LjIzOC4yMDAiLCJwcmV2aW91cyI6WyJodHRwczovLzc3LjIyMy4xMDcuMjI2Il0sImlzc3VlZEF0IjoxNzk0MDgwMjA5fQ==",
+    "signature": "MEUCIQCgHaYPoG0QOX8V7Y7RTt4lDMpclkqbQmCtbrPU/iWStwIgHNysFvir4uWdwmnrB8QPyNRlah2mGPEYsuGaBtC7JFM="
+  }
+}
