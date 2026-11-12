@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const ADDRESS_BOOK: &str = "https://fastcloud.comf.workers.dev/service.json";
+const ADDRESS_BOOK: &str = "https://veirune.comf.workers.dev/service.json";
 const PUBLIC_KEY: &str = include_str!("service-endpoint-public-key.txt");
 const MAX_BYTES: usize = 8192;
 
@@ -248,8 +248,8 @@ mod tests {
             assert!(public_origin(value).is_err(), "{value}");
         }
         assert_eq!(
-            public_origin("https://80.47.238.200/").unwrap(),
-            "https://80.47.238.200"
+            public_origin("https://89.125.126.32/").unwrap(),
+            "https://89.125.126.32"
         );
     }
     #[test]
