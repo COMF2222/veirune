@@ -2,6 +2,21 @@
   "schema": 1,
   "releases": [
     {
+      "version": "0.4.32",
+      "ru": {
+        "title": "Подключение к новому серверу",
+        "changes": [
+          "Исправлен адрес получения подписанной информации о сервере после переноса."
+        ]
+      },
+      "en": {
+        "title": "Connection to the new server",
+        "changes": [
+          "Fixed the signed server discovery address after the migration."
+        ]
+      }
+    },
+    {
       "version": "0.4.31",
       "ru": {
         "title": "Ровная громкость и устойчивое подключение",
