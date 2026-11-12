@@ -52,7 +52,7 @@ pub const AUTH_ROOT: &str = "https://secure.soundcloud.com";
 
 pub const AUTH_SERVICE: &str = "com.fastcloud.tokens";
 pub const LEGACY_SERVER_ORIGIN: &str = "https://77.223.107.226";
-pub const CURRENT_SERVER_ORIGIN: &str = "https://89.125.126.32";
+pub const CURRENT_SERVER_ORIGIN: &str = "https://80.47.238.200";
 pub fn replacement_server_origin(previous: &str) -> Option<&'static str> {
     (previous == LEGACY_SERVER_ORIGIN).then_some(CURRENT_SERVER_ORIGIN)
 }

@@ -1,6 +1,7 @@
 # Verified service moves
 
-Desktop 0.4.31 reads `https://veirune.comf.workers.dev/service.json` natively.
+Desktop 0.4.31 reads `https://fastcloud.comf.workers.dev/service.json` natively;
+the updated source uses `https://veirune.comf.workers.dev/service.json`.
 Only a valid P-256/SHA-256 announcement under the pinned owner key can replace
 an owned service endpoint. Public discovery gets no OAuth/cookies. The signed
 envelope is bounded, persisted and protected against serial rollback/conflicts;
