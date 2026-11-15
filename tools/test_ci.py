@@ -128,26 +128,42 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertEqual(list(jobs), ['linux'])
         steps = jobs['linux']['steps']
         prepare = next(i for i, step in enumerate(steps) if step.get('uses') == './.github/actions/clap-resources')
-        build = next(i for i, step in enumerate(steps) if 'tauri.linux.conf.json' in step.get('run', ''))
-        self.assertLess(prepare, build)
-        self.assertIn('tauri.private.conf.json', steps[build]['run'])
-        # AppImage bundling must not depend on FUSE being available.
-        self.assertEqual(jobs['linux']['env']['APPIMAGE_EXTRACT_AND_RUN'], '1')
+        builds = [i for i, step in enumerate(steps) if 'tauri.linux.conf.json' in step.get('run', '')]
+        self.assertEqual(len(builds), 2)
+        self.assertLess(prepare, min(builds))
+        for index in builds:
+            self.assertIn('tauri.private.conf.json', steps[index]['run'])
+        # linuxdeploy is an AppImage: extracting it avoids FUSE, and verbose
+        # output keeps its diagnostics when bundling fails.
+        self.assertEqual(workflow['env']['APPIMAGE_EXTRACT_AND_RUN'], '1')
+        appimage = next(step['run'] for step in steps if '--bundles appimage' in step.get('run', ''))
+        self.assertIn('--verbose', appimage)
+        # Release installers are renamed before they are uploaded.
+        staging = next(step for step in steps if 'stage_linux_release.py' in step.get('run', ''))
+        self.assertIn('$BUNDLE', staging['run'])
         # The release workflow calls this Linux workflow for tagged builds, so
         # the published packages come from the very same tested steps.
         triggers = workflow.get('on') or workflow.get(True)
         self.assertIn('workflow_call', triggers)
-        inputs = triggers['workflow_call']['inputs']
-        self.assertIn('destination', inputs)
+        self.assertIn('artifact', triggers['workflow_call']['inputs'])
         ci = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8'))
         caller = ci['jobs']['linux-release']
         self.assertEqual(caller['uses'], './.github/workflows/linux.yml')
         self.assertEqual(caller['if'], "startsWith(github.ref, 'refs/tags/v')")
-        self.assertEqual(caller['with']['artifact'], 'linux-release')
-        self.assertEqual(caller['with']['destination'], 'desktop/release')
+        self.assertEqual(caller['with'], {'artifact': 'linux-release'})
         self.assertIn('linux-release', ci['jobs']['publish']['needs'])
-        names = {upload['with']['name'] for upload in steps if upload.get('uses', '').startswith('actions/upload-artifact')}
-        self.assertEqual(names, {"${{ inputs.artifact || 'veirune-linux-x86_64' }}", "${{ inputs.artifact || 'veirune-linux-x86_64' }}-appimage"})
+        uploads = [step for step in steps if step.get('uses', '').startswith('actions/upload-artifact')]
+        self.assertEqual({upload['with']['name'] for upload in uploads}, {
+            "${{ inputs.artifact || 'veirune-linux-x86_64' }}",
+            "${{ inputs.artifact || 'veirune-linux-x86_64' }}-appimage",
+        })
+        self.assertEqual({upload['with']['path'] for upload in uploads}, {'${{ env.RELEASE }}/*.deb', '${{ env.RELEASE }}/*.AppImage'})
+        # linuxdeploy's GTK plugin aborts without dpkg-architecture and the
+        # gobject-introspection pkg-config file, and the AppImage bundles the
+        # gstreamer codecs WebKit needs for SoundCloud audio.
+        packages = next(step for step in steps if step.get('name') == 'Install Linux build dependencies')['run']
+        for package in ('dpkg-dev', 'libgirepository1.0-dev', 'gstreamer1.0-libav'):
+            self.assertIn(package, packages)
         action = yaml.safe_load((ROOT / '.github/actions/clap-resources/action.yml').read_text(encoding='utf-8'))
         linux = [step for step in action['runs']['steps'] if step.get('name') == 'Prepare and verify Linux worker']
         self.assertEqual(len(linux), 1)

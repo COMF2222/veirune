@@ -161,7 +161,6 @@ jobs:
     secrets: inherit
     with:
       artifact: linux-release
-      destination: desktop/release
 
   publish:
     needs: [desktop, macos, release-windows, linux-release]

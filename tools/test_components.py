@@ -157,7 +157,6 @@ class ComponentsTest(unittest.TestCase):
             deb.write_bytes(b"deb")
             appimage.write_bytes(b"appimage")
             destination = root / "desktop/release"
-            (destination / "x86_64").mkdir(parents=True, exist_ok=True)
             target = stage_linux_release.stage(deb, destination, "0.4.32")
             stage_linux_release.stage(appimage, destination, "0.4.32")
             self.assertEqual(target.name, "Veirune_0.4.32_linux-x86_64.deb")
