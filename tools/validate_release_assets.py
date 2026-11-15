@@ -5,6 +5,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# Release flows stage into subdirectories (Linux packages under x86_64/).
+
 
 def validate(dist, version):
     signed = [f"{asset_prefix(version)}_{version}_x64-{kind}.exe" for kind in ("setup", "update")]
@@ -16,8 +18,8 @@ def validate(dist, version):
     # later without editing a published release, so they gate publication too.
     installers.extend(f"{asset_prefix(version)}_{version}_linux-x86_64{suffix}" for suffix in (".deb", ".AppImage"))
     for name in signed + installers:
-        path = dist / name
-        if not path.is_file() or path.stat().st_size == 0:
+        found = next((candidate for candidate in (dist / name, dist / "x86_64" / name) if candidate.is_file()), None)
+        if found is None or found.stat().st_size == 0:
             raise ValueError(f"Missing or empty release asset: {name}")
     for name in signed:
         signature = dist / (name + ".sig")
@@ -27,6 +29,7 @@ def validate(dist, version):
 
 def main():
     version = json.loads((ROOT / "desktop/src-tauri/tauri.conf.json").read_text(encoding="utf-8"))["version"]
+    # Validation reads the same paths that actions/download-artifact populates.
     validate(ROOT / "desktop/release", version)
     print("Windows, Apple Silicon, Intel and Linux installers and update signatures verified")
 

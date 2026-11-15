@@ -152,12 +152,17 @@ jobs:
           retention-days: 3
 
   linux-release:
-    # Reuse the tested Linux workflow so the released packages are built from
-    # the same steps that produce the downloadable artifacts.
+    # Call the tested Linux workflow (the same steps as the downloadable build)
+    # and stage its packages next to the Windows/macOS assets. Publication
+    # below waits for these artifacts.
     if: startsWith(github.ref, 'refs/tags/v')
     uses: ./.github/workflows/linux.yml
     # Linux release builds read the backend address from the shared secret.
     secrets: inherit
+    with:
+      artifact: linux-release
+      destination: desktop/release
+
   publish:
     needs: [desktop, macos, release-windows, linux-release]
     if: startsWith(github.ref, 'refs/tags/v')

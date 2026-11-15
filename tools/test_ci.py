@@ -50,6 +50,11 @@ class ReleaseSafetyTest(unittest.TestCase):
             for suffix in ('.deb', '.AppImage'):
                 (root / f'Fastcloud_{version}_linux-x86_64{suffix}').write_bytes(b'fixture')
             validate(root, version)
+            # Release runs stage Linux packages in x86_64/, not in the release root.
+            (root / 'x86_64').mkdir()
+            for suffix in ('.deb', '.AppImage'):
+                (root / f'Fastcloud_{version}_linux-x86_64{suffix}').rename(root / 'x86_64' / f'Fastcloud_{version}_linux-x86_64{suffix}')
+            validate(root, version)
             (root / (signed[-1] + '.sig')).write_text(' ')
             with self.assertRaises(ValueError): validate(root, version)
 
@@ -120,27 +125,29 @@ class ReleaseSafetyTest(unittest.TestCase):
     def test_linux_workflow_bundles_the_verified_native_clap_worker(self):
         workflow = yaml.safe_load((ROOT / '.github/workflows/linux.yml').read_text(encoding='utf-8'))
         jobs = workflow['jobs']
+        self.assertEqual(list(jobs), ['linux'])
         steps = jobs['linux']['steps']
         prepare = next(i for i, step in enumerate(steps) if step.get('uses') == './.github/actions/clap-resources')
         build = next(i for i, step in enumerate(steps) if 'tauri.linux.conf.json' in step.get('run', ''))
         self.assertLess(prepare, build)
         self.assertIn('tauri.private.conf.json', steps[build]['run'])
+        # AppImage bundling must not depend on FUSE being available.
+        self.assertEqual(jobs['linux']['env']['APPIMAGE_EXTRACT_AND_RUN'], '1')
         # The release workflow calls this Linux workflow for tagged builds, so
         # the published packages come from the very same tested steps.
         triggers = workflow.get('on') or workflow.get(True)
         self.assertIn('workflow_call', triggers)
+        inputs = triggers['workflow_call']['inputs']
+        self.assertIn('destination', inputs)
         ci = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8'))
         caller = ci['jobs']['linux-release']
         self.assertEqual(caller['uses'], './.github/workflows/linux.yml')
-        self.assertIn("refs/tags/v", caller['if'])
-        release = jobs['linux-release']
-        self.assertIn("refs/tags/v", release['if'])
-        self.assertIn('secrets.FASTCLOUD_SERVER_URL', release['env']['VITE_FASTCLOUD_SERVER_URL'])
-        upload = next(step for step in release['steps'] if step.get('uses', '').startswith('actions/upload-artifact'))
-        self.assertEqual(upload['with']['name'], 'linux-release')
-        staging = next(step for step in release['steps'] if 'stage_linux_release.py' in step.get('run', ''))
-        self.assertIn('*.deb', staging['run'])
-        self.assertIn('*.AppImage', staging['run'])
+        self.assertEqual(caller['if'], "startsWith(github.ref, 'refs/tags/v')")
+        self.assertEqual(caller['with']['artifact'], 'linux-release')
+        self.assertEqual(caller['with']['destination'], 'desktop/release')
+        self.assertIn('linux-release', ci['jobs']['publish']['needs'])
+        names = {upload['with']['name'] for upload in steps if upload.get('uses', '').startswith('actions/upload-artifact')}
+        self.assertEqual(names, {"${{ inputs.artifact || 'veirune-linux-x86_64' }}", "${{ inputs.artifact || 'veirune-linux-x86_64' }}-appimage"})
         action = yaml.safe_load((ROOT / '.github/actions/clap-resources/action.yml').read_text(encoding='utf-8'))
         linux = [step for step in action['runs']['steps'] if step.get('name') == 'Prepare and verify Linux worker']
         self.assertEqual(len(linux), 1)

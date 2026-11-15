@@ -157,6 +157,7 @@ class ComponentsTest(unittest.TestCase):
             deb.write_bytes(b"deb")
             appimage.write_bytes(b"appimage")
             destination = root / "desktop/release"
+            (destination / "x86_64").mkdir(parents=True, exist_ok=True)
             target = stage_linux_release.stage(deb, destination, "0.4.32")
             stage_linux_release.stage(appimage, destination, "0.4.32")
             self.assertEqual(target.name, "Veirune_0.4.32_linux-x86_64.deb")
@@ -165,6 +166,13 @@ class ComponentsTest(unittest.TestCase):
             empty = bundle / "deb/empty.deb"
             empty.write_bytes(b"")
             with self.assertRaises(ValueError): stage_linux_release.stage(empty, destination, "0.4.32")
+            # A release must never be overwritten with a different build, while
+            # an identical rerun is allowed.
+            conflict = destination / "veirune-test"
+            conflict.mkdir()
+            (conflict / "Veirune_0.4.32_linux-x86_64.deb").write_bytes(b"other")
+            with self.assertRaises(ValueError): stage_linux_release.stage(deb, conflict, "0.4.32")
+            stage_linux_release.stage(deb, destination, "0.4.32")
 
     def test_macos_staging_keeps_full_and_light_archives_and_the_dmg(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(stage_macos_release,"ROOT",Path(directory)):
