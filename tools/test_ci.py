@@ -103,56 +103,39 @@ class ReleaseSafetyTest(unittest.TestCase):
             run.assert_called_once()
             self.assertEqual(run.call_args.args[0], [str(worker), str(bundle / 'model')])
 
-    def test_linux_preparation_writes_bundle_resources_and_verifies_cached_worker(self):
+    def test_linux_preparation_patches_numpy_runtime_and_verifies_cached_worker(self):
         import hashlib
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); bundle = root / 'desktop/src-tauri/resources/clap'
-            (root / 'desktop/src-tauri').mkdir(parents=True)
-            (root / 'desktop/src-tauri/tauri.conf.json').write_text('{"productName": "Veirune"}')
             hashes = {}
             for name in ('config.json','preprocessor_config.json','tokenizer.json','tokenizer_config.json','special_tokens_map.json','vocab.json','merges.txt','onnx/audio_model_quantized.onnx','onnx/text_model_quantized.onnx'):
                 path = bundle / 'model' / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'fixture')
                 if name.startswith('onnx/'): hashes[path.name] = hashlib.sha256(b'fixture').hexdigest()
             worker = bundle / 'worker-lite/fastcloud-clap/fastcloud-clap'; worker.parent.mkdir(parents=True); worker.write_bytes(b'worker')
-            # Cached workers are restored together with the staged runtime libs.
-            (bundle / 'appimage-libs').mkdir(parents=True)
-            (bundle / 'appimage-libs/libquadmath-test.so.0').write_bytes(b'lib')
+            numpy_libs = bundle / 'worker-lite/fastcloud-clap/_internal/numpy.libs'
+            numpy_libs.mkdir(parents=True)
+            (numpy_libs / 'libgfortran-test.so.5').write_bytes(b'gfortran')
             licenses = root / 'assets/licenses'; licenses.mkdir(parents=True)
             for name in ('NOTICE-CLAP.txt', 'LICENSE-APACHE-2.0.txt'): (licenses / name).write_text('fixture')
             response = subprocess.CompletedProcess([], 0, json.dumps({'ready': True})+'\n'+json.dumps({'vectors': [[0]*512]})+'\n', '')
-            with patch.object(prepare_linux_clap, 'ROOT', root), patch.object(prepare_linux_clap, 'BUNDLE', bundle), patch.object(prepare_linux_clap, 'HASHES', hashes), patch.object(prepare_linux_clap.sys, 'platform', 'linux'), patch.object(prepare_linux_clap.subprocess, 'run', return_value=response) as run:
+            patched = []
+            with patch.object(prepare_linux_clap, 'ROOT', root), patch.object(prepare_linux_clap, 'BUNDLE', bundle), patch.object(prepare_linux_clap, 'HASHES', hashes), patch.object(prepare_linux_clap.sys, 'platform', 'linux'), patch.object(prepare_linux_clap, 'patch_rpath', side_effect=lambda paths: patched.extend(paths) or paths), patch.object(prepare_linux_clap.subprocess, 'run', return_value=response) as run:
                 prepare_linux_clap.main()
             run.assert_called_once()
             self.assertEqual(run.call_args.args[0], [str(worker), str(bundle / 'model')])
             config = json.loads((root / 'desktop/src-tauri/tauri.private.conf.json').read_text(encoding='utf-8'))
             self.assertIn('resources/clap/worker-lite/fastcloud-clap/**/*', config['bundle']['resources'])
-            # numpy ships its Fortran runtime under auditwheel-mangled names that
-            # linuxdeploy cannot resolve from the worker's private directory.
-            files = config['bundle']['linux']['appimage']['files']
-            staged = str((bundle / 'appimage-libs').resolve())
-            self.assertEqual(files['usr/lib'], staged)
-            self.assertEqual(files['usr/lib/Veirune/resources/clap/worker-lite/fastcloud-clap/_internal/numpy.libs'], staged)
+            # linuxdeploy inspects each vendored library on its own, so numpy's
+            # mangled runtime has to carry its own $ORIGIN search path.
+            self.assertEqual([path.name for path in patched], ['libgfortran-test.so.5'])
 
-    def test_linux_staging_exposes_numpy_fortran_runtime_for_linuxdeploy(self):
+    def test_linux_preparation_rejects_a_worker_without_numpy_runtime(self):
         import prepare_linux_clap
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            numpy_libs = root / 'numpy.libs'
-            numpy_libs.mkdir()
-            (numpy_libs / 'libquadmath-96973f99.so.0.0.0').write_bytes(b'quadmath')
-            (numpy_libs / 'libgfortran-040039e1.so.5.0.0').write_bytes(b'gfortran')
-            bundle = root / 'clap'
-            self.assertFalse(prepare_linux_clap.has_appimage_libs(bundle))
-            staged = prepare_linux_clap.stage_appimage_libs(bundle, numpy_libs)
-            self.assertEqual([path.name for path in staged],
-                             ['libquadmath-96973f99.so.0.0.0', 'libgfortran-040039e1.so.5.0.0'])
-            self.assertEqual((bundle / 'appimage-libs/libquadmath-96973f99.so.0.0.0').read_bytes(), b'quadmath')
-            self.assertEqual((bundle / 'appimage-libs/libgfortran-040039e1.so.5.0.0').read_bytes(), b'gfortran')
-            self.assertTrue(prepare_linux_clap.has_appimage_libs(bundle))
-            # Missing libraries must stop the build instead of shipping a bundle
-            # that linuxdeploy will reject later on.
+            # A worker without numpy.libs cannot be bundled: linuxdeploy would
+            # only fail much later with an opaque linuxdeploy error.
             with self.assertRaises(SystemExit):
-                prepare_linux_clap.stage_appimage_libs(bundle, root / 'empty')
+                prepare_linux_clap.patch_numpy_runtime(Path(directory))
 
     def test_linux_workflow_bundles_the_verified_native_clap_worker(self):
         workflow = yaml.safe_load((ROOT / '.github/workflows/linux.yml').read_text(encoding='utf-8'))
@@ -193,12 +176,9 @@ class ReleaseSafetyTest(unittest.TestCase):
         # linuxdeploy's GTK plugin aborts without dpkg-architecture and the
         # gobject-introspection pkg-config file.
         packages = next(step for step in steps if step.get('name') == 'Install Linux build dependencies')['run']
-        for package in ('dpkg-dev', 'libgirepository1.0-dev'):
+        for package in ('dpkg-dev', 'libgirepository1.0-dev', 'patchelf'):
             self.assertIn(package, packages)
         action = yaml.safe_load((ROOT / '.github/actions/clap-resources/action.yml').read_text(encoding='utf-8'))
-        cached = [step['with']['path'] for step in action['runs']['steps'] if step.get('uses', '').startswith('actions/cache')]
-        # The staged numpy runtime has to survive worker cache hits.
-        self.assertTrue(any('appimage-libs' in path for path in cached))
         linux = [step for step in action['runs']['steps'] if step.get('name') == 'Prepare and verify Linux worker']
         self.assertEqual(len(linux), 1)
         self.assertEqual(linux[0]['if'], "runner.os == 'Linux'")

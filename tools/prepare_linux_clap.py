@@ -20,14 +20,6 @@ HASHES = {
 def prepare_bundle_config(root):
     config = root / "desktop/src-tauri/tauri.private.conf.json"
     config.parent.mkdir(parents=True, exist_ok=True)
-    product = json.loads((root / "desktop/src-tauri/tauri.conf.json").read_text(encoding="utf-8"))["productName"]
-    # linuxdeploy resolves the NEEDED entries of every ELF file it finds, but it
-    # only searches system paths and the AppDir's own library directories.
-    # numpy's wheel bundles its Fortran runtime under auditwheel-mangled names
-    # inside numpy.libs, so the frozen CLAP worker looks broken to linuxdeploy.
-    # Exposing the same files in usr/lib (and next to the worker's other numpy
-    # libraries) satisfies both the bundler and the loader.
-    libs = str((root / "desktop/src-tauri/resources/clap/appimage-libs").resolve())
     resources = [
         "resources/clap/worker-lite/fastcloud-clap/**/*",
         "resources/clap/model/*.json",
@@ -36,45 +28,37 @@ def prepare_bundle_config(root):
         "resources/clap/model/onnx/text_model_quantized.onnx",
         "resources/clap/licenses/*.txt",
     ]
-    # AppImage settings live under bundle.linux, not at the bundle root.
-    config.write_text(json.dumps({"bundle": {
-        "resources": resources,
-        "linux": {"appimage": {"files": {
-            "usr/lib": libs,
-            f"usr/lib/{product}/resources/clap/worker-lite/fastcloud-clap/_internal/numpy.libs": libs,
-        }}},
-    }}, indent=2) + "\n", encoding="utf-8")
+    config.write_text(json.dumps({"bundle": {"resources": resources}},
+                                 indent=2) + "\n", encoding="utf-8")
 
 
-def has_appimage_libs(bundle):
-    return any((bundle / "appimage-libs").glob("libquadmath-*.so*"))
+def patch_rpath(paths, patchelf="patchelf"):
+    """Give a vendored library an $ORIGIN search path and return the paths.
 
-
-def stage_appimage_libs(bundle, numpy_libs):
-    """Copy numpy's mangled Fortran runtime where linuxdeploy can see it.
-
-    linuxdeploy resolves the NEEDED entries of every ELF file with the AppDir's
-    library directories on the search path; the auditwheel-mangled names only
-    resolve if the files themselves sit in one of those directories.
+    linuxdeploy resolves the NEEDED entries of every ELF file it finds by
+    running plain ldd, which only looks at the object's own RPATH/RUNPATH,
+    LD_LIBRARY_PATH and the system directories. An extension module's
+    transitive DT_RPATH hides that from a library inspected on its own.
     """
-    target = bundle / "appimage-libs"
-    staged = []
-    for pattern in ("libquadmath-*.so*", "libgfortran-*.so*"):
-        found = sorted(Path(numpy_libs).glob(pattern))
-        if not found:
-            raise SystemExit(f"numpy libraries do not ship {pattern}: {numpy_libs}")
-        staged.extend(found)
-    target.mkdir(parents=True, exist_ok=True)
-    for library in staged:
-        shutil.copy2(library, target / library.name)
-    return [target / library.name for library in staged]
+    for path in paths:
+        subprocess.run([patchelf, "--set-rpath", "$ORIGIN", str(path)],
+                       check=True, capture_output=True)
+    return paths
 
 
-def numpy_libs_dir(python):
-    code = ("import pathlib, numpy; "
-            "print(pathlib.Path(numpy.__file__).resolve().parent.parent / 'numpy.libs')")
-    return Path(subprocess.run([str(python), "-c", code], check=True,
-                               capture_output=True, text=True).stdout.strip())
+def patch_numpy_runtime(bundle):
+    """Make numpy's vendored libraries find each other when inspected alone.
+
+    auditwheel renames the bundled libgfortran/libquadmath/libopenblas and leaves
+    them without any RPATH; only the numpy extension modules carry a transitive
+    DT_RPATH into numpy.libs. linuxdeploy inspects each library directly, so
+    without this every Linux AppImage build fails with
+    "Could not find dependency: libquadmath-...so.0.0.0".
+    """
+    libraries = sorted(bundle.glob("worker-lite/**/numpy.libs/*.so*"))
+    if not libraries:
+        raise SystemExit(f"frozen CLAP worker does not ship numpy runtime libraries: {bundle}")
+    return patch_rpath(libraries)
 
 
 def main():
@@ -116,12 +100,9 @@ def main():
     # downloaded artifact archive may lose it. PyInstaller already produces an
     # executable here; make the requirement explicit for cached copies.
     worker.chmod(0o755)
-    if not has_appimage_libs(BUNDLE):
-        # A cached worker comes without the temporary build environment, so the
-        # runtime libraries must be restored from the same cache entry.
-        if not python.is_file():
-            raise SystemExit("CLAP worker cache lacks numpy runtime libraries; clear the worker cache")
-        stage_appimage_libs(BUNDLE, numpy_libs_dir(python))
+    # linuxdeploy inspects the vendored numpy libraries one by one; without an
+    # $ORIGIN RPATH each looks like it is missing its own dependencies.
+    patch_numpy_runtime(BUNDLE)
     # Fail packaging if native dependencies or frozen imports do not work.
     verify(worker, BUNDLE / "model")
     print("Native Linux CLAP worker and pinned models verified")
