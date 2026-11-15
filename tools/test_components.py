@@ -10,6 +10,7 @@ from unittest.mock import patch
 from prepare_components import prepare
 from release_manifest import manifests
 import stage_release_installer
+import stage_linux_release
 import stage_macos_release
 import prepare_macos_clap
 
@@ -141,6 +142,29 @@ class ComponentsTest(unittest.TestCase):
                     entry=data["platforms"][f"darwin-{arch}"]
                     self.assertTrue(entry["url"].endswith(f"macos-{arch}-{suffix}.app.tar.gz"))
                     self.assertEqual(entry["signature"],f"{arch}-{suffix}-signature")
+
+    def test_linux_staging_publishes_the_deb_and_appimage_under_release_names(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(stage_linux_release, "ROOT", Path(directory)):
+            root = Path(directory)
+            (root / "desktop/src-tauri/tauri.conf.json").parent.mkdir(parents=True)
+            (root / "desktop/src-tauri/tauri.conf.json").write_text('{"version":"0.4.32"}')
+            bundle = root / "desktop/src-tauri/target/release/bundle"
+            (bundle / "deb").mkdir(parents=True)
+            (bundle / "appimage").mkdir(parents=True)
+            deb = bundle / "deb/Veirune_0.4.32_amd64.deb"
+            appimage = bundle / "appimage/Veirune_0.4.32_amd64.AppImage"
+            deb.write_bytes(b"deb")
+            appimage.write_bytes(b"appimage")
+            destination = root / "desktop/release"
+            target = stage_linux_release.stage(deb, destination, "0.4.32")
+            stage_linux_release.stage(appimage, destination, "0.4.32")
+            self.assertEqual(target.name, "Veirune_0.4.32_linux-x86_64.deb")
+            self.assertEqual((destination / "Veirune_0.4.32_linux-x86_64.deb").read_bytes(), b"deb")
+            self.assertEqual((destination / "Veirune_0.4.32_linux-x86_64.AppImage").read_bytes(), b"appimage")
+            empty = bundle / "deb/empty.deb"
+            empty.write_bytes(b"")
+            with self.assertRaises(ValueError): stage_linux_release.stage(empty, destination, "0.4.32")
 
     def test_macos_staging_keeps_full_and_light_archives_and_the_dmg(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(stage_macos_release,"ROOT",Path(directory)):

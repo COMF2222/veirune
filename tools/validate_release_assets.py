@@ -1,4 +1,4 @@
-"""Require all three signed platform updates before publishing a release."""
+"""Require signed Windows and macOS updates and both Linux installers before publishing."""
 from release_brand import asset_prefix
 import json
 from pathlib import Path
@@ -12,6 +12,9 @@ def validate(dist, version):
     for arch in ("aarch64", "x86_64"):
         installers.append(f"{asset_prefix(version)}_{version}_macos-{arch}.dmg")
         signed.extend(f"{asset_prefix(version)}_{version}_macos-{arch}-{kind}.app.tar.gz" for kind in ("setup", "update"))
+    # Linux packages are built by their own workflow and cannot be attached
+    # later without editing a published release, so they gate publication too.
+    installers.extend(f"{asset_prefix(version)}_{version}_linux-x86_64{suffix}" for suffix in (".deb", ".AppImage"))
     for name in signed + installers:
         path = dist / name
         if not path.is_file() or path.stat().st_size == 0:
@@ -25,7 +28,7 @@ def validate(dist, version):
 def main():
     version = json.loads((ROOT / "desktop/src-tauri/tauri.conf.json").read_text(encoding="utf-8"))["version"]
     validate(ROOT / "desktop/release", version)
-    print("Windows, Apple Silicon and Intel installers and update signatures verified")
+    print("Windows, Apple Silicon, Intel and Linux installers and update signatures verified")
 
 
 if __name__ == "__main__":

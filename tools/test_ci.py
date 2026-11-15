@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 import yaml
+import prepare_linux_clap
 import prepare_macos_clap
 import verify_clap_worker
 from release_state import published
@@ -44,6 +45,10 @@ class ReleaseSafetyTest(unittest.TestCase):
                 signed.extend(f'Fastcloud_{version}_macos-{arch}-{kind}.app.tar.gz' for kind in ('setup', 'update'))
             for name in signed:
                 (root / name).write_bytes(b'fixture'); (root / (name + '.sig')).write_text('signature')
+            # Linux packages are mandatory assets: no release without them.
+            with self.assertRaises(ValueError): validate(root, version)
+            for suffix in ('.deb', '.AppImage'):
+                (root / f'Fastcloud_{version}_linux-x86_64{suffix}').write_bytes(b'fixture')
             validate(root, version)
             (root / (signed[-1] + '.sig')).write_text(' ')
             with self.assertRaises(ValueError): validate(root, version)
@@ -53,7 +58,7 @@ class ReleaseSafetyTest(unittest.TestCase):
         jobs = workflow['jobs']
         self.assertNotIn('needs', jobs['release-windows'])
         self.assertNotIn('needs', jobs['macos'])
-        self.assertEqual(set(jobs['publish']['needs']), {'desktop', 'macos', 'release-windows'})
+        self.assertEqual(set(jobs['publish']['needs']), {'desktop', 'macos', 'release-windows', 'linux-release'})
         self.assertEqual(jobs['publish']['permissions']['contents'], 'write')
         self.assertNotIn('permissions', jobs['release-windows'])
         steps = jobs['publish']['steps']
@@ -92,6 +97,54 @@ class ReleaseSafetyTest(unittest.TestCase):
                 prepare_macos_clap.main()
             run.assert_called_once()
             self.assertEqual(run.call_args.args[0], [str(worker), str(bundle / 'model')])
+
+    def test_linux_preparation_writes_bundle_resources_and_verifies_cached_worker(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); bundle = root / 'desktop/src-tauri/resources/clap'
+            hashes = {}
+            for name in ('config.json','preprocessor_config.json','tokenizer.json','tokenizer_config.json','special_tokens_map.json','vocab.json','merges.txt','onnx/audio_model_quantized.onnx','onnx/text_model_quantized.onnx'):
+                path = bundle / 'model' / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'fixture')
+                if name.startswith('onnx/'): hashes[path.name] = hashlib.sha256(b'fixture').hexdigest()
+            worker = bundle / 'worker-lite/fastcloud-clap/fastcloud-clap'; worker.parent.mkdir(parents=True); worker.write_bytes(b'worker')
+            licenses = root / 'assets/licenses'; licenses.mkdir(parents=True)
+            for name in ('NOTICE-CLAP.txt', 'LICENSE-APACHE-2.0.txt'): (licenses / name).write_text('fixture')
+            response = subprocess.CompletedProcess([], 0, json.dumps({'ready': True})+'\n'+json.dumps({'vectors': [[0]*512]})+'\n', '')
+            with patch.object(prepare_linux_clap, 'ROOT', root), patch.object(prepare_linux_clap, 'BUNDLE', bundle), patch.object(prepare_linux_clap, 'HASHES', hashes), patch.object(prepare_linux_clap.sys, 'platform', 'linux'), patch.object(prepare_linux_clap.subprocess, 'run', return_value=response) as run:
+                prepare_linux_clap.main()
+            run.assert_called_once()
+            self.assertEqual(run.call_args.args[0], [str(worker), str(bundle / 'model')])
+            config = json.loads((root / 'desktop/src-tauri/tauri.private.conf.json').read_text(encoding='utf-8'))
+            self.assertIn('resources/clap/worker-lite/fastcloud-clap/**/*', config['bundle']['resources'])
+
+    def test_linux_workflow_bundles_the_verified_native_clap_worker(self):
+        workflow = yaml.safe_load((ROOT / '.github/workflows/linux.yml').read_text(encoding='utf-8'))
+        jobs = workflow['jobs']
+        steps = jobs['linux']['steps']
+        prepare = next(i for i, step in enumerate(steps) if step.get('uses') == './.github/actions/clap-resources')
+        build = next(i for i, step in enumerate(steps) if 'tauri.linux.conf.json' in step.get('run', ''))
+        self.assertLess(prepare, build)
+        self.assertIn('tauri.private.conf.json', steps[build]['run'])
+        # The release workflow calls this Linux workflow for tagged builds, so
+        # the published packages come from the very same tested steps.
+        triggers = workflow.get('on') or workflow.get(True)
+        self.assertIn('workflow_call', triggers)
+        ci = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8'))
+        caller = ci['jobs']['linux-release']
+        self.assertEqual(caller['uses'], './.github/workflows/linux.yml')
+        self.assertIn("refs/tags/v", caller['if'])
+        release = jobs['linux-release']
+        self.assertIn("refs/tags/v", release['if'])
+        self.assertIn('secrets.FASTCLOUD_SERVER_URL', release['env']['VITE_FASTCLOUD_SERVER_URL'])
+        upload = next(step for step in release['steps'] if step.get('uses', '').startswith('actions/upload-artifact'))
+        self.assertEqual(upload['with']['name'], 'linux-release')
+        staging = next(step for step in release['steps'] if 'stage_linux_release.py' in step.get('run', ''))
+        self.assertIn('*.deb', staging['run'])
+        self.assertIn('*.AppImage', staging['run'])
+        action = yaml.safe_load((ROOT / '.github/actions/clap-resources/action.yml').read_text(encoding='utf-8'))
+        linux = [step for step in action['runs']['steps'] if step.get('name') == 'Prepare and verify Linux worker']
+        self.assertEqual(len(linux), 1)
+        self.assertEqual(linux[0]['if'], "runner.os == 'Linux'")
 
 
 if __name__ == '__main__': unittest.main()

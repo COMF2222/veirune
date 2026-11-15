@@ -12,11 +12,11 @@ runs:
         path: desktop/src-tauri/resources/clap/model
         # The revision is pinned in both preparation scripts. Model bytes are
         # identical on every platform; worker caches below remain native.
-        key: clap-model-v1-${{ hashFiles('tools/prepare_private_clap.ps1', 'tools/prepare_macos_clap.py', 'tools/verify_clap_worker.py') }}
+        key: clap-model-v1-${{ hashFiles('tools/prepare_private_clap.ps1', 'tools/prepare_macos_clap.py', 'tools/prepare_linux_clap.py', 'tools/verify_clap_worker.py') }}
     - uses: actions/cache@v4
       with:
         path: desktop/src-tauri/resources/clap/worker-lite
-        key: clap-worker-v2-${{ runner.os }}-${{ inputs.arch }}-${{ hashFiles('desktop/clap_worker.py', 'desktop/clap_features.py', 'tools/prepare_private_clap.ps1', 'tools/prepare_macos_clap.py', 'tools/verify_clap_worker.py') }}
+        key: clap-worker-v2-${{ runner.os }}-${{ inputs.arch }}-${{ hashFiles('desktop/clap_worker.py', 'desktop/clap_features.py', 'tools/prepare_private_clap.ps1', 'tools/prepare_macos_clap.py', 'tools/prepare_linux_clap.py', 'tools/verify_clap_worker.py') }}
     - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4
     - name: Prepare and verify Windows worker
       if: runner.os == 'Windows'
@@ -26,3 +26,7 @@ runs:
       if: runner.os == 'macOS'
       shell: bash
       run: python tools/prepare_macos_clap.py
+    - name: Prepare and verify Linux worker
+      if: runner.os == 'Linux'
+      shell: bash
+      run: python tools/prepare_linux_clap.py

@@ -1,0 +1,11 @@
+{
+  "bundle": {
+    "targets": ["deb", "appimage"],
+    "createUpdaterArtifacts": false,
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0", "libayatana-appindicator3-1", "libasound2t64", "libssl3t64", "ca-certificates", "libstdc++6", "libgomp1"]
+      }
+    }
+  }
+}

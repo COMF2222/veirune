@@ -54,6 +54,27 @@ fn runtime() -> Option<(PathBuf, PathBuf)> {
 
 pub fn available() -> bool { runtime().is_some() }
 
+/// Installer resources keep the executable bit, but a worker that was unpacked
+/// from a downloaded artifact archive may lose it. Restore it before spawning so
+/// a bundled Linux build reports CLAP inference instead of "permission denied".
+fn ensure_worker_executable(worker: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = std::fs::metadata(worker)
+            .with_context(|| format!("inspect CLAP worker {}", worker.display()))?
+            .permissions();
+        if permissions.mode() & 0o111 != 0o111 {
+            std::fs::set_permissions(worker, std::fs::Permissions::from_mode(0o755)).with_context(
+                || format!("make CLAP worker executable {}", worker.display()),
+            )?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = worker;
+    Ok(())
+}
+
 pub fn release_if_idle() {
     if let Some(lock) = WORKER.get()
         && let Ok(mut worker) = lock.try_lock()
@@ -65,6 +86,7 @@ pub fn release_if_idle() {
 impl Worker {
     fn start() -> Result<Self> {
         let (executable, model) = runtime().context("bundled CLAP runtime is unavailable")?;
+        ensure_worker_executable(&executable)?;
         let root = root()?;
         std::fs::create_dir_all(&root)?;
         let log = std::fs::File::create(root.join("clap-worker.log"))?;

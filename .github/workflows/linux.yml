@@ -1,0 +1,128 @@
+name: Linux desktop builds
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # Called by the release workflow so tag builds attach Linux packages.
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+          shared-key: linux-desktop-x86_64
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libssl-dev patchelf libfuse2t64
+      - name: Restore and verify native CLAP resources
+        uses: ./.github/actions/clap-resources
+        with:
+          arch: x86_64
+      - run: npm ci
+        working-directory: desktop
+      - name: Build Linux packages with CLAP ("My Wave")
+        working-directory: desktop
+        run: npm run tauri -- build --config src-tauri/tauri.linux.conf.json --config src-tauri/tauri.private.conf.json --bundles deb,appimage --ci -- --locked
+      - name: Verify the package ships an executable CLAP worker and weights
+        run: |
+          deb=$(ls desktop/src-tauri/target/release/bundle/deb/*.deb)
+          dpkg-deb -c "$deb" > clap-listing.txt
+          grep -E 'resources/clap/worker-lite/fastcloud-clap/fastcloud-clap$' clap-listing.txt
+          grep -E 'resources/clap/model/onnx/(audio|text)_model_quantized.onnx$' clap-listing.txt
+          # Debian packaging must not drop the executable bit of the frozen worker.
+          grep -E '^-rwx.*resources/clap/worker-lite/fastcloud-clap/fastcloud-clap$' clap-listing.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: veirune-linux-x86_64
+          path: |
+            desktop/src-tauri/target/release/bundle/deb/*.deb
+            desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+          retention-days: 7
+
+  linux-release:
+    # Windows/macOS releases call this workflow to attach Linux packages to
+    # the same GitHub release. Publication waits for this job.
+    if: startsWith(github.ref, 'refs/tags/v')
+    concurrency:
+      group: linux-release-${{ github.ref }}
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    env:
+      VITE_FASTCLOUD_SERVER_URL: ${{ secrets.FASTCLOUD_SERVER_URL }}
+      FASTCLOUD_DISCORD_CLIENT_ID: ${{ vars.FASTCLOUD_DISCORD_CLIENT_ID }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+          shared-key: linux-desktop-x86_64
+          save-if: false
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libssl-dev patchelf libfuse2t64
+      - name: Verify release configuration
+        run: |
+          test -n "$VITE_FASTCLOUD_SERVER_URL"
+          python tools/check_release_version.py
+      - name: Restore and verify native CLAP resources
+        uses: ./.github/actions/clap-resources
+        with:
+          arch: x86_64
+      - run: npm ci
+        working-directory: desktop
+      - name: Build Linux packages with CLAP ("My Wave")
+        working-directory: desktop
+        run: npm run tauri -- build --config src-tauri/tauri.linux.conf.json --config src-tauri/tauri.private.conf.json --bundles deb,appimage --ci -- --locked
+      - name: Verify the package ships an executable CLAP worker and weights
+        run: |
+          deb=$(ls desktop/src-tauri/target/release/bundle/deb/*.deb)
+          dpkg-deb -c "$deb" > clap-listing.txt
+          grep -E 'resources/clap/worker-lite/fastcloud-clap/fastcloud-clap$' clap-listing.txt
+          grep -E 'resources/clap/model/onnx/(audio|text)_model_quantized.onnx$' clap-listing.txt
+          grep -E '^-rwx.*resources/clap/worker-lite/fastcloud-clap/fastcloud-clap$' clap-listing.txt
+      - name: Stage installers for the release
+        run: |
+          for file in desktop/src-tauri/target/release/bundle/deb/*.deb desktop/src-tauri/target/release/bundle/appimage/*.AppImage; do
+            python tools/stage_linux_release.py "$file"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-release
+          path: desktop/release/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3

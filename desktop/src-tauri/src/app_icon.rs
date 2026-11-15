@@ -229,9 +229,9 @@ pub async fn application_icon(app: AppHandle, id: Option<u8>) -> Result<IconStat
     let note = {
         let handle = app.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            system_icon(&path, true)?;
+            let note = system_icon(&path, true)?;
             window_icons(&handle, id)?;
-            Ok::<_, String>(None)
+            Ok::<_, String>(note)
         })
         .await
         .map_err(|e| e.to_string())??

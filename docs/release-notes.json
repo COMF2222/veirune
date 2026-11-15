@@ -987,6 +987,25 @@
           "Improvements to background dimming and lyrics appearance."
         ]
       }
+    },
+    {
+      "version": "0.4.33",
+      "ru": {
+        "title": "Veirune на Linux",
+        "changes": [
+          "Появились сборки для Linux: .deb для Ubuntu и совместимых систем и AppImage для остальных дистрибутивов, включая Arch.",
+          "На Linux работают «Моя волна», тексты песен, вход и оформление так же, как на Windows и macOS.",
+          "Защищённое воспроизведение на Linux зависит от системного WebKitGTK и пока проверено не на всех системах."
+        ]
+      },
+      "en": {
+        "title": "Veirune on Linux",
+        "changes": [
+          "Linux builds are available: a .deb for Ubuntu and compatible systems and an AppImage for other distributions, including Arch.",
+          "On Linux, My Wave, lyrics, sign-in and appearance work the same way as on Windows and macOS.",
+          "Protected playback on Linux depends on the system WebKitGTK and is not yet verified on every distribution."
+        ]
+      }
     }
   ]
 }
