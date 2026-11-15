@@ -36,12 +36,13 @@ def prepare_bundle_config(root):
         "resources/clap/model/onnx/text_model_quantized.onnx",
         "resources/clap/licenses/*.txt",
     ]
+    # AppImage settings live under bundle.linux, not at the bundle root.
     config.write_text(json.dumps({"bundle": {
         "resources": resources,
-        "appimage": {"files": {
+        "linux": {"appimage": {"files": {
             "usr/lib": libs,
             f"usr/lib/{product}/resources/clap/worker-lite/fastcloud-clap/_internal/numpy.libs": libs,
-        }},
+        }}},
     }}, indent=2) + "\n", encoding="utf-8")
 
 
@@ -50,11 +51,19 @@ def has_appimage_libs(bundle):
 
 
 def stage_appimage_libs(bundle, numpy_libs):
-    """Copy numpy's mangled Fortran runtime where linuxdeploy can see it."""
+    """Copy numpy's mangled Fortran runtime where linuxdeploy can see it.
+
+    linuxdeploy resolves the NEEDED entries of every ELF file with the AppDir's
+    library directories on the search path; the auditwheel-mangled names only
+    resolve if the files themselves sit in one of those directories.
+    """
     target = bundle / "appimage-libs"
-    staged = sorted(Path(numpy_libs).glob("libquadmath-*.so*"))
-    if not staged:
-        raise SystemExit(f"numpy libraries do not ship libquadmath: {numpy_libs}")
+    staged = []
+    for pattern in ("libquadmath-*.so*", "libgfortran-*.so*"):
+        found = sorted(Path(numpy_libs).glob(pattern))
+        if not found:
+            raise SystemExit(f"numpy libraries do not ship {pattern}: {numpy_libs}")
+        staged.extend(found)
     target.mkdir(parents=True, exist_ok=True)
     for library in staged:
         shutil.copy2(library, target / library.name)

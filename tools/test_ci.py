@@ -128,7 +128,7 @@ class ReleaseSafetyTest(unittest.TestCase):
             self.assertIn('resources/clap/worker-lite/fastcloud-clap/**/*', config['bundle']['resources'])
             # numpy ships its Fortran runtime under auditwheel-mangled names that
             # linuxdeploy cannot resolve from the worker's private directory.
-            files = config['bundle']['appimage']['files']
+            files = config['bundle']['linux']['appimage']['files']
             staged = str((bundle / 'appimage-libs').resolve())
             self.assertEqual(files['usr/lib'], staged)
             self.assertEqual(files['usr/lib/Veirune/resources/clap/worker-lite/fastcloud-clap/_internal/numpy.libs'], staged)
@@ -144,8 +144,10 @@ class ReleaseSafetyTest(unittest.TestCase):
             bundle = root / 'clap'
             self.assertFalse(prepare_linux_clap.has_appimage_libs(bundle))
             staged = prepare_linux_clap.stage_appimage_libs(bundle, numpy_libs)
-            self.assertEqual([path.name for path in staged], ['libquadmath-96973f99.so.0.0.0'])
+            self.assertEqual([path.name for path in staged],
+                             ['libquadmath-96973f99.so.0.0.0', 'libgfortran-040039e1.so.5.0.0'])
             self.assertEqual((bundle / 'appimage-libs/libquadmath-96973f99.so.0.0.0').read_bytes(), b'quadmath')
+            self.assertEqual((bundle / 'appimage-libs/libgfortran-040039e1.so.5.0.0').read_bytes(), b'gfortran')
             self.assertTrue(prepare_linux_clap.has_appimage_libs(bundle))
             # Missing libraries must stop the build instead of shipping a bundle
             # that linuxdeploy will reject later on.
